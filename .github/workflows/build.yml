@@ -61,12 +61,11 @@ jobs:
             if [ -d "node_modules/$p" ]; then
               echo "OK      $p  $(node -p "require('./node_modules/$p/package.json').version")"
             else
-              echo "MISSING $p"
-              missing=1
+              echo "MISSING $p"; missing=1
             fi
           done
           exit $missing
-
+          
       - name: Generate Android project
         working-directory: nova
         run: npx expo prebuild --platform android --clean
