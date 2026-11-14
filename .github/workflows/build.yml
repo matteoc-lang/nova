@@ -3,7 +3,14 @@ name: Build Nova APK
 on:
   push:
     branches: [main]
+    paths:
+      - 'nova/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
+
+concurrency:
+  group: nova-apk
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -25,6 +32,28 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('nova/package.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('nova/package.json') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/android/sdk/ndk/26.1.10909125
+          key: ndk-26.1.10909125-${{ runner.os }}
 
       - name: Remove UTF-8 BOM from source files
         run: |
@@ -65,7 +94,7 @@ jobs:
             fi
           done
           exit $missing
-          
+
       - name: Generate Android project
         working-directory: nova
         run: npx expo prebuild --platform android --clean
@@ -80,7 +109,7 @@ jobs:
         working-directory: nova/android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon
 
       - name: List built APKs
         run: ls -la nova/android/app/build/outputs/apk/release/
