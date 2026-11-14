@@ -1,4 +1,4 @@
-﻿{
+{
   "expo": {
     "name": "NOVA",
     "slug": "nova-jellyfin",
@@ -10,6 +10,7 @@
     "android": {
       "package": "com.matteo.nova",
       "versionCode": 1,
+      "usesCleartextTraffic": true,
       "permissions": ["INTERNET"]
     },
     "plugins": ["expo-secure-store"]
