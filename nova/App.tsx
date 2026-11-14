@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, Animated, AppState, FlatList, Image, ImageBackground,
+  ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, ImageBackground,
   Modal, PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text,
   TextInput, View, useWindowDimensions
 } from "react-native";
@@ -32,13 +32,9 @@ const usePlayer = () => useContext(PlayerCtx);
 const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: C.bg, card: C.bg, text: C.text, primary: C.red, border: C.line } };
 
 async function enterPip(p: any): Promise<boolean> {
-  try { if (p && typeof p.enterPictureInPicture === "function") { await p.enterPictureInPicture(); return true; } } catch {}
-  try { if (p && typeof p.startPictureInPicture === "function") { await p.startPictureInPicture(); return true; } } catch {}
+  try { if (p?.enterPictureInPicture) { await p.enterPictureInPicture(); return true; } } catch {}
+  try { if (p?.startPictureInPicture) { await p.startPictureInPicture(); return true; } } catch {}
   return false;
-}
-
-async function exitPip(p: any) {
-  try { if (p && typeof p.exitPictureInPicture === "function") await p.exitPictureInPicture(); } catch {}
 }
 
 const defaultSettings = {
@@ -65,7 +61,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.4.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="4.0.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -597,18 +593,15 @@ function PlayerProvider({ children }: any) {
       setMode("pip");
       setMenu(null);
     } else {
-      flash("PiP non disponibile su questa versione di Android/expo-video");
+      flash("PiP non disponibile");
     }
   }
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", state => {
-      if (state !== "active") {
-        if (playingRef.current && settingsRef.current.pip && modeRef.current === "full") {
-          goPip();
-        }
-      } else if (modeRef.current === "pip") {
-        exitPip(player);
+      if (state !== "active" && playingRef.current && settingsRef.current.pip && modeRef.current === "full") {
+        goPip();
+      } else if (state === "active" && modeRef.current === "pip") {
         setMode("mini");
         setControls(true);
       }
@@ -805,13 +798,6 @@ function PlayerProvider({ children }: any) {
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
-/* Superficie video minuscola ma montata: tiene viva la resa mentre siamo in PiP */
-function PipMount() {
-  const P = usePlayer();
-  if (P.mode !== "pip") return null;
-  return <VideoView player={P.player} style={{ width: 1, height: 1, position: "absolute", opacity: 0, left: -10 }} nativeControls={false} allowsPictureInPicture />;
-}
-
 function PlayerOverlay() {
   const P = usePlayer();
   const { settings, setSettings, items, list, toggleList } = useApp();
@@ -820,17 +806,9 @@ function PlayerOverlay() {
   const isLandscape = P.landscape || dim.width > dim.height;
   const drag = useRef(new Animated.Value(0)).current;
 
-  const gestureRefs = useRef({ landscape: false, height: 0, minimize: () => {} });
-  useEffect(() => {
-    gestureRefs.current.landscape = isLandscape;
-    gestureRefs.current.height = dim.height;
-    gestureRefs.current.minimize = () => P.minimize();
-  });
-
   useEffect(() => { if (P.mode === "full") drag.setValue(0); }, [P.mode]);
 
-  const dragThreshold = (_: any, g: any) =>
-    !gestureRefs.current.landscape && g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.3;
+  const dragThreshold = (_: any, g: any) => !isLandscape && g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.3;
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
@@ -839,8 +817,8 @@ function PlayerOverlay() {
     onPanResponderMove: (_, g) => drag.setValue(Math.max(0, g.dy)),
     onPanResponderRelease: (_, g) => {
       if (g.dy > 110 || g.vy > 0.7) {
-        Animated.timing(drag, { toValue: gestureRefs.current.height + 40, duration: 210, useNativeDriver: true })
-          .start(() => { drag.setValue(0); gestureRefs.current.minimize(); });
+        Animated.timing(drag, { toValue: dim.height + 40, duration: 210, useNativeDriver: true })
+          .start(() => { drag.setValue(0); P.minimize(); });
       } else {
         Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
       }
@@ -1041,7 +1019,7 @@ function PlayerOverlay() {
                     <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
                     <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
                     <MenuToggle label="Background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
-                    <MenuToggle label="Picture-in-Picture" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
+                    <MenuToggle label="Picture-in-Picture all'uscita" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
                     <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
                     <MenuItem label="Miniplayer" onPress={() => { P.setMenu(null); P.minimize(); }} />
                     <MenuItem label="Chiudi video" onPress={() => { P.setMenu(null); P.close(); }} />
@@ -1489,7 +1467,6 @@ export default function App() {
                 </Stack.Navigator>
               </NavigationContainer>
             )}
-            <PipMount />
             <MiniPlayer />
             <PlayerOverlay />
           </View>
