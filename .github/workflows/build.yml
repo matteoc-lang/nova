@@ -80,13 +80,13 @@ jobs:
       - name: Install ALL required Expo packages explicitly
         working-directory: nova
         run: |
-          npx expo install expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-linear-gradient expo-secure-store expo-screen-orientation @expo/vector-icons @react-native-async-storage/async-storage @react-native-community/slider react-native-safe-area-context react-native-screens
+          npx expo install expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-secure-store expo-screen-orientation @expo/vector-icons @react-native-async-storage/async-storage @react-native-community/slider react-native-safe-area-context react-native-screens
 
       - name: Verify required packages are present
         working-directory: nova
         run: |
           missing=0
-          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-linear-gradient expo-secure-store expo-screen-orientation; do
+          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-secure-store expo-screen-orientation; do
             if [ -d "node_modules/$p" ]; then
               echo "OK      $p  $(node -p "require('./node_modules/$p/package.json').version")"
             else
@@ -109,7 +109,7 @@ jobs:
         working-directory: nova/android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: List built APKs
         run: ls -la nova/android/app/build/outputs/apk/release/
