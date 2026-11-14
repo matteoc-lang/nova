@@ -57,7 +57,7 @@ jobs:
 
       - name: Remove UTF-8 BOM from source files
         run: |
-          find nova -type f \( -name '*.json' -o -name '*.js' -o -name '*.ts' -o -name '*.tsx' \) \
+          find nova -type f \( -name '*.json' -o -name '*.js' -o -name '*.cjs' -o -name '*.mjs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.svg' \) \
             -not -path '*/node_modules/*' -print0 \
           | xargs -0 -r sed -i '1s/^\xEF\xBB\xBF//'
 
@@ -71,22 +71,13 @@ jobs:
 
       - name: Install JS dependencies
         working-directory: nova
-        run: npm install --no-audit --no-fund
-
-      - name: Align Expo SDK versions
-        working-directory: nova
-        run: npx expo install --fix
-
-      - name: Install ALL required Expo packages explicitly
-        working-directory: nova
-        run: |
-          npx expo install expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-secure-store expo-screen-orientation @expo/vector-icons @react-native-async-storage/async-storage @react-native-community/slider react-native-safe-area-context react-native-screens
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Verify required packages are present
         working-directory: nova
         run: |
           missing=0
-          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-secure-store expo-screen-orientation; do
+          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-navigation-bar expo-secure-store expo-screen-orientation; do
             if [ -d "node_modules/$p" ]; then
               echo "OK      $p  $(node -p "require('./node_modules/$p/package.json').version")"
             else
@@ -98,6 +89,17 @@ jobs:
       - name: Generate Android project
         working-directory: nova
         run: npx expo prebuild --platform android --clean
+
+      - name: Apply custom launcher icon
+        run: |
+          set -e
+          mkdir -p /tmp/icongen
+          cd /tmp/icongen
+          npm init -y >/dev/null 2>&1
+          npm install sharp@0.33.5 --no-audit --no-fund --legacy-peer-deps
+          cd "$GITHUB_WORKSPACE"
+          ICON_SVG="$GITHUB_WORKSPACE/nova/assets/icon.svg" RES="$GITHUB_WORKSPACE/nova/android/app/src/main/res" NODE_PATH=/tmp/icongen/node_modules node nova/scripts/apply-icon.cjs
+          find nova/android/app/src/main/res -name "ic_launcher*.png" | sort
 
       - name: Point Gradle to Android SDK
         run: echo "sdk.dir=$ANDROID_HOME" > nova/android/local.properties
