@@ -31,7 +31,17 @@ jobs:
           node -v
           java -version
           echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME"
+
+      - name: Remove UTF-8 BOM from source files
+        run: |
+          find nova -type f \( -name '*.json' -o -name '*.js' -o -name '*.ts' -o -name '*.tsx' \) \
+            -not -path '*/node_modules/*' -print0 \
+          | xargs -0 -r sed -i '1s/^\xEF\xBB\xBF//'
+          echo "BOM removed"
+
+      - name: Validate JSON files
+        run: |
+          node -e "const fs=require('fs');['nova/package.json','nova/app.json','nova/tsconfig.json'].forEach(f=>{JSON.parse(fs.readFileSync(f,'utf8'));console.log('OK '+f)})"
 
       - name: Accept Android SDK licenses
         run: |
