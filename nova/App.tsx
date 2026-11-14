@@ -47,7 +47,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.4.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.5.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -209,7 +209,7 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
       id: itemId, url: opts.demoUrl, method: "DirectPlay", hls: false, quality: opts.quality || "auto",
       duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }],
       subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null,
-      mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264"
+      mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264", startOffset: 0
     };
   }
 
@@ -218,6 +218,7 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
   let bitrate = rates[quality] || 40000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
 
+  const startSeconds = Math.max(0, opts.startSeconds || 0);
   const explicitAudio = opts.audioIndex != null ? opts.audioIndex : null;
   const explicitSub = opts.subtitleIndex != null && opts.subtitleIndex >= 0 ? opts.subtitleIndex : null;
   const subOff = opts.subtitleIndex === -1;
@@ -234,6 +235,7 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
       AllowVideoStreamCopy: !force,
       AllowAudioStreamCopy: !force
     };
+    if (startSeconds > 0) body.StartTimeTicks = Math.round(startSeconds * 1e7);
     if (audioIndex != null) body.AudioStreamIndex = audioIndex;
     if (subtitleIndex != null && subtitleIndex >= 0) body.SubtitleStreamIndex = subtitleIndex;
     const r = await fetch(session.server + "/Items/" + itemId + "/PlaybackInfo?userId=" + session.userId, {
@@ -272,7 +274,6 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     method = "DirectPlay";
   } else if (ms.TranscodingUrl) {
     url = ms.TranscodingUrl.startsWith("http") ? ms.TranscodingUrl : session.server + ms.TranscodingUrl;
-    url = removeUrlParam(url, "StartTimeTicks");
     if (ai != null) url = setUrlParam(url, "AudioStreamIndex", ai);
     if (si != null) {
       url = setUrlParam(url, "SubtitleStreamIndex", si);
@@ -281,6 +282,7 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
       url = removeUrlParam(url, "SubtitleStreamIndex");
       url = removeUrlParam(url, "SubtitleMethod");
     }
+    if (startSeconds > 0) url = setUrlParam(url, "StartTimeTicks", Math.round(startSeconds * 1e7));
     if (!/[?&]api_key=/.test(url)) url = setUrlParam(url, "api_key", session.token);
     method = mustForce ? "Transcode" : "DirectStream";
   } else {
@@ -288,12 +290,14 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     method = "DirectPlay";
   }
 
+  const hls = /\.m3u8/i.test(url);
   return {
-    id: itemId, url, method, hls: /\.m3u8/i.test(url), quality,
+    id: itemId, url, method, hls, quality,
     duration: (ms.RunTimeTicks || 0) / 1e7,
     audio, subs, audioIndex: ai, subtitleIndex: si,
     mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
-    reason: burnSubs ? "Transcoding con sottotitoli masterizzati" : mustForce ? "Transcoding richiesto o fallback" : "Direct Play nativo"
+    reason: burnSubs ? "Transcoding con sottotitoli masterizzati" : mustForce ? "Transcoding richiesto o fallback" : "Direct Play nativo",
+    startOffset: hls && startSeconds > 0 ? startSeconds : 0
   };
 }
 
@@ -808,6 +812,7 @@ function PlayerScreen({ route, navigation }: any) {
   const [episode, setEpisode] = useState<any>(route.params.episode || epMap[route.params.episodeId] || null);
   const [info, setInfo] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [buffering, setBuffering] = useState(false);
   const [error, setError] = useState("");
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
@@ -821,8 +826,10 @@ function PlayerScreen({ route, navigation }: any) {
   const [countdown, setCountdown] = useState(8);
   const [landscape, setLandscape] = useState(false);
   const [notice, setNotice] = useState("");
+  const [videoSize, setVideoSize] = useState({ w: 16, h: 9 });
 
   const player = useVideoPlayer(null, p => { p.loop = false; });
+  const baseOffset = useRef(0);
   const pendingSeek = useRef<number | null>(null);
   const seekLock = useRef(0);
   const scrubbingRef = useRef(false);
@@ -851,11 +858,13 @@ function PlayerScreen({ route, navigation }: any) {
 
   async function load(opts: any = {}, epArg = episodeRef.current, startAt = 0) {
     if (!item) return;
-    setLoading(true); setError(""); setEnded(false);
+    setLoading(true); setBuffering(false); setError(""); setEnded(false);
     optsRef.current = { ...optsRef.current, ...opts };
+    seekLock.current = Date.now() + 1500;
     try {
       const inf = await getPlayback(session, epArg ? epArg.id : item.id, settings, {
         ...optsRef.current,
+        startSeconds: startAt,
         demoUrl: epArg?.video || item.video,
         duration: epArg?.duration || item.duration
       });
@@ -863,7 +872,8 @@ function PlayerScreen({ route, navigation }: any) {
       setInfo(inf);
       const fullDuration = inf.duration || epArg?.duration || item.duration || 0;
       setDuration(fullDuration);
-      pendingSeek.current = startAt;
+      baseOffset.current = inf.startOffset || 0;
+      pendingSeek.current = inf.hls ? null : startAt;
       setPosition(startAt);
       positionRef.current = startAt;
       player.replace({ uri: inf.url });
@@ -897,16 +907,22 @@ function PlayerScreen({ route, navigation }: any) {
 
   useEventListener(player, "statusChange", ({ status, error }: any) => {
     if (status === "readyToPlay") {
+      setBuffering(false);
+      setLoading(false);
+      try {
+        const vt = player.videoTrack;
+        if (vt?.width && vt?.height) setVideoSize({ w: vt.width, h: vt.height });
+      } catch {}
       if (pendingSeek.current != null) {
         const t = pendingSeek.current;
         pendingSeek.current = null;
         try { player.currentTime = t; } catch {}
       }
       try { player.play(); } catch {}
-      setLoading(false);
     } else if (status === "loading") {
-      setLoading(true);
+      setBuffering(true);
     } else if (status === "error") {
+      setBuffering(false);
       if (!retried.current && infoRef.current?.method === "DirectPlay") {
         retried.current = true;
         flashNotice("Formato non supportato: passo al transcoding…");
@@ -918,9 +934,13 @@ function PlayerScreen({ route, navigation }: any) {
     }
   });
 
+  useEventListener(player, "videoTrackChange", ({ videoTrack }: any) => {
+    if (videoTrack?.width && videoTrack?.height) setVideoSize({ w: videoTrack.width, h: videoTrack.height });
+  });
+
   useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
     if (scrubbingRef.current || Date.now() < seekLock.current) return;
-    const pos = currentTime || 0;
+    const pos = baseOffset.current + (currentTime || 0);
     positionRef.current = pos;
     setPosition(pos);
     const dur = infoRef.current?.duration || player.duration || 0;
@@ -951,10 +971,10 @@ function PlayerScreen({ route, navigation }: any) {
   }, [info?.url]);
 
   useEffect(() => {
-    if (!controls || !playing || menu || loading) return;
+    if (!controls || !playing || menu || loading || buffering) return;
     const t = setTimeout(() => setControls(false), 4000);
     return () => clearTimeout(t);
-  }, [controls, playing, menu, loading]);
+  }, [controls, playing, menu, loading, buffering]);
 
   useEffect(() => {
     if (!ended || !nextEp || !settings.autoplay) return;
@@ -979,15 +999,19 @@ function PlayerScreen({ route, navigation }: any) {
   function seekTo(target: number) {
     const dur = infoRef.current?.duration || duration || 0;
     const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
-    seekLock.current = Date.now() + 900;
+    seekLock.current = Date.now() + 1500;
     setPosition(T);
     positionRef.current = T;
     finishedRef.current = false;
-    try { player.currentTime = T; } catch {}
+    if (infoRef.current?.hls) {
+      load(optsRef.current, episodeRef.current, T);
+    } else {
+      try { player.currentTime = T; } catch {}
+    }
   }
 
   function togglePlay() {
-    if (loading) return;
+    if (loading || buffering) return;
     if (playing) player.pause(); else player.play();
     setControls(true);
   }
@@ -1029,19 +1053,22 @@ function PlayerScreen({ route, navigation }: any) {
   const menuH = Math.min(dim.height * 0.82, 560);
   const activeAudio = info?.audio?.find((a: any) => a.Index === info.audioIndex);
   const activeSub = info?.subs?.find((s: any) => s.Index === info.subtitleIndex);
+  const busy = loading || buffering;
+
+  const aspect = videoSize.w && videoSize.h ? videoSize.w / videoSize.h : 16 / 9;
+  let vw = dim.width;
+  let vh = dim.width / aspect;
+  if (vh > dim.height) { vh = dim.height; vw = dim.height * aspect; }
 
   return (
     <View style={styles.playerRoot}>
       <StatusBar hidden />
-      <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} />
+
+      <View style={styles.videoWrap} pointerEvents="none">
+        <VideoView player={player} style={{ width: vw, height: vh }} contentFit="contain" nativeControls={false} />
+      </View>
 
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setControls(v => !v)} />
-
-      {loading && (
-        <View style={styles.centerSpin} pointerEvents="none">
-          <ActivityIndicator color={C.red} size="large" />
-        </View>
-      )}
 
       {!!notice && <View style={[styles.notice, { top: insets.top + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
 
@@ -1079,12 +1106,6 @@ function PlayerScreen({ route, navigation }: any) {
             <IconButton name="sync-outline" size={24} onPress={rotate} />
           </View>
 
-          {!loading && (
-            <Pressable onPress={togglePlay} style={styles.centerPlay} hitSlop={30}>
-              <Ionicons name={playing ? "pause" : "play"} size={62} color="#fff" style={styles.centerIcon} />
-            </Pressable>
-          )}
-
           <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.playerBottomScrim} pointerEvents="none" />
           <View style={[styles.playerBottom, { bottom: insets.bottom + 8 }]}>
             <Slider style={{ width: "100%", height: 34 }} minimumValue={0} maximumValue={Math.max(1, duration)}
@@ -1108,6 +1129,16 @@ function PlayerScreen({ route, navigation }: any) {
           </View>
         </>
       )}
+
+      {busy ? (
+        <View style={styles.centerSpin} pointerEvents="none">
+          <ActivityIndicator color={C.red} size="large" />
+        </View>
+      ) : (controls && !ended && !error) ? (
+        <Pressable onPress={togglePlay} style={styles.centerPlay} hitSlop={30}>
+          <Ionicons name={playing ? "pause" : "play"} size={62} color="#fff" style={styles.centerIcon} />
+        </Pressable>
+      ) : null}
 
       {ended && (
         <View style={[styles.endOverlay, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
@@ -1474,27 +1505,28 @@ const styles = StyleSheet.create({
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
   roundOn: { borderColor: C.green },
   playerRoot: { flex: 1, backgroundColor: "#000" },
-  centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center" },
-  playerError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.95)", alignItems: "center", justifyContent: "center", padding: 24, gap: 12 },
-  notice: { position: "absolute", top: 70, alignSelf: "center", backgroundColor: "rgba(8,8,11,0.9)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, maxWidth: "86%" },
+  videoWrap: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", backgroundColor: "#000" },
+  centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center", zIndex: 60 },
+  playerError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.95)", alignItems: "center", justifyContent: "center", padding: 24, gap: 12, zIndex: 50 },
+  notice: { position: "absolute", top: 70, alignSelf: "center", backgroundColor: "rgba(8,8,11,0.9)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, maxWidth: "86%", zIndex: 55 },
   noticeText: { color: C.text, fontSize: 13, fontWeight: "700", textAlign: "center" },
   playerTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 120 },
   playerBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 160 },
-  playerTop: { position: "absolute", top: 12, left: 12, right: 12, flexDirection: "row", alignItems: "center", gap: 10 },
+  playerTop: { position: "absolute", top: 12, left: 12, right: 12, flexDirection: "row", alignItems: "center", gap: 10, zIndex: 20 },
   playerTitle: { color: "#fff", fontWeight: "800", fontSize: 16 },
   playerSub: { color: "#d2d2d8", fontSize: 12 },
-  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center" },
+  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center", zIndex: 30 },
   centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
-  playerBottom: { position: "absolute", left: 12, right: 12, bottom: 8 },
+  playerBottom: { position: "absolute", left: 12, right: 12, bottom: 8, zIndex: 20 },
   playerControls: { flexDirection: "row", alignItems: "center", gap: 2 },
   playerTime: { color: "#fff", fontWeight: "700", fontSize: 13 },
   hdButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
   hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 19, alignItems: "center", justifyContent: "center" },
   hdText: { color: "#fff", fontWeight: "900", fontSize: 10, lineHeight: 12, textAlign: "center", includeFontPadding: false },
-  statsPanel: { position: "absolute", left: 12, backgroundColor: "rgba(8,8,11,0.82)", borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 10, maxWidth: "72%" },
+  statsPanel: { position: "absolute", left: 12, backgroundColor: "rgba(8,8,11,0.82)", borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 10, maxWidth: "72%", zIndex: 25 },
   statsTitle: { color: C.green, fontWeight: "900", fontSize: 10, letterSpacing: 1.4, marginBottom: 5 },
   statsLine: { color: "#d6d6de", fontSize: 11, lineHeight: 16 },
-  endOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.93)", alignItems: "center", justifyContent: "center", padding: 24, gap: 18 },
+  endOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.93)", alignItems: "center", justifyContent: "center", padding: 24, gap: 18, zIndex: 45 },
   endLabel: { color: C.muted, textTransform: "uppercase", letterSpacing: 2, fontWeight: "800", fontSize: 12 },
   nextCard: { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 14, padding: 14, width: "100%" },
   nextThumb: { width: 120, aspectRatio: 16 / 9, borderRadius: 8, backgroundColor: C.surface3 },
