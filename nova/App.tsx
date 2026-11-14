@@ -1,11 +1,12 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator, Alert, Animated, AppState, FlatList, Image, ImageBackground,
-  Modal, PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text,
-  TextInput, View, useWindowDimensions
+  Modal, NativeModules, PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text,
+  TextInput, UIManager, View, useWindowDimensions
 } from "react-native";
-import { useEventListener } from "expo";
-import { useVideoPlayer, VideoView } from "expo-video";
+import { useEvent, useEventListener } from "expo";
+import * as ExpoVideo from "expo-video";
+const { useVideoPlayer, VideoView } = ExpoVideo;
 import * as NavigationBar from "expo-navigation-bar";
 import { NavigationContainer, DefaultTheme, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -30,6 +31,78 @@ const PlayerCtx = createContext<any>(null);
 const useApp = () => useContext(AppCtx);
 const usePlayer = () => useContext(PlayerCtx);
 const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: C.bg, card: C.bg, text: C.text, primary: C.red, border: C.line } };
+
+// ---- Picture-in-Picture helpers -------------------------------------------------
+// expo-video (Android) espone il PiP solo come metodo "fire and forget" sul player,
+// senza eventi: lo stato reale vive nel modulo nativo. Qui lo sincronizziamo noi in
+// modo affidabile, con piu fallback (Nuovo Architecture -> ExpoModules core -> UIManager).
+const NovaPIP: any = (NativeModules as any).NovaPIP;
+let pipActiveCache = false;
+let pipLastQuery = 0;
+
+function pipCall(name: string): boolean | null {
+  // 1) Native module custom (se presente nel build)
+  try { if (NovaPIP && typeof NovaPIP[name] === "function") return !!NovaPIP[name](); } catch {}
+  // 2) Expo Modules core (TurboModule / interop layer)
+  try {
+    const core: any = (NativeModules as any).ExpoModulesCore;
+    if (core && typeof core.callFunctionSync === "function") {
+      return !!core.callFunctionSync("EXVideoView", name, []);
+    }
+  } catch {}
+  // 3) Vecchi async constants (valore in cache)
+  try {
+    const m: any = (NativeModules as any).EXVideoView || (NativeModules as any).expo_video;
+    if (m && typeof m.Constants === "object" && m.Constants) {
+      if ("isInPictureInPicture" in m.Constants) return !!m.Constants.isInPictureInPicture;
+      if ("pipActive" in m.Constants) return !!m.Constants.pipActive;
+    }
+  } catch {}
+  // 4) UIManager (deprecated ma ancora funzionante su RN 0.76)
+  try {
+    const viewConfig = (UIManager as any).getViewManagerConfig?.("EXVideoView");
+    if (viewConfig && typeof viewConfig[name] === "function") return !!viewConfig[name]();
+  } catch {}
+  return null;
+}
+
+function isPipActiveNow(): boolean {
+  const r = pipCall("getIsPictureInPictureActive");
+  if (r != null) { pipActiveCache = r; pipLastQuery = Date.now(); return r; }
+  return pipActiveCache;
+}
+
+function refreshPipState() {
+  const r = pipCall("getIsPictureInPictureActive");
+  if (r != null) { pipActiveCache = r; pipLastQuery = Date.now(); }
+}
+
+async function enterPip(p: any): Promise<boolean> {
+  try {
+    if (p && typeof p.enterPictureInPicture === "function") { await p.enterPictureInPicture(); return true; }
+    if (p && typeof p.startPictureInPicture === "function") { await p.startPictureInPicture(); return true; }
+  } catch {}
+  try { if (typeof (ExpoVideo as any).enterPictureInPicture === "function") { await (ExpoVideo as any).enterPictureInPicture(); return true; } } catch {}
+  try {
+    const core: any = (NativeModules as any).ExpoModulesCore;
+    if (core && typeof core.callFunctionAsync === "function") { await core.callFunctionAsync("EXVideoView", "enterPictureInPicture", []); return true; }
+  } catch {}
+  try { if (NovaPIP && typeof NovaPIP.enter === "function") { await NovaPIP.enter(); return true; } } catch {}
+  return false;
+}
+
+async function exitPip(p: any): Promise<boolean> {
+  try {
+    if (p && typeof p.exitPictureInPicture === "function") { await p.exitPictureInPicture(); return true; }
+  } catch {}
+  try { if (typeof (ExpoVideo as any).exitPictureInPicture === "function") { await (ExpoVideo as any).exitPictureInPicture(); return true; } } catch {}
+  try {
+    const core: any = (NativeModules as any).ExpoModulesCore;
+    if (core && typeof core.callFunctionAsync === "function") { await core.callFunctionAsync("EXVideoView", "exitPictureInPicture", []); return true; }
+  } catch {}
+  try { if (NovaPIP && typeof NovaPIP.exit === "function") { await NovaPIP.exit(); return true; } } catch {}
+  return false;
+}
 
 const defaultSettings = {
   streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: true,
@@ -494,7 +567,7 @@ function PlayerProvider({ children }: any) {
   const { session, settings, saveProgress, progress } = useApp();
   const player = useVideoPlayer(null, p => { p.loop = false; });
 
-  const [mode, setMode] = useState<"closed" | "full" | "mini">("closed");
+  const [mode, setMode] = useState<"closed" | "full" | "mini" | "pip">("closed");
   const [item, setItem] = useState<any>(null);
   const [episode, setEpisode] = useState<any>(null);
   const [info, setInfo] = useState<any>(null);
@@ -536,6 +609,10 @@ function PlayerProvider({ children }: any) {
   const noticeTimer = useRef<any>(null);
   const playingRef = useRef(false);
   const settingsRef = useRef(settings);
+  const modeRef = useRef(mode);
+  const pipWanted = useRef(false);
+  const pipReturn = useRef<"full" | "mini">("mini");
+  const pipPoll = useRef<any>(null);
 
   useEffect(() => { infoRef.current = info; }, [info]);
   useEffect(() => { itemRef.current = item; }, [item]);
@@ -578,11 +655,62 @@ function PlayerProvider({ children }: any) {
     return () => { NavigationBar.setVisibilityAsync("visible").catch(() => {}); };
   }, [mode]);
 
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+
+  // ---- Picture-in-Picture: ingresso/uscita affidabili + ritorno in app --------
+  const startPipPoll = () => {
+    if (pipPoll.current) clearInterval(pipPoll.current);
+    pipPoll.current = setInterval(() => {
+      if (!pipWanted.current) return;
+      // Se siamo usciti dal PiP (X, "close", swipe via notifica...) torniamo in app.
+      // NB: dopo l'enter il sistema impiega un po' a segnalare l'attivazione,
+      // quindi ignoriamo le prime letture "false".
+      if (Date.now() - pipLastQuery < 1200) return;
+      if (!isPipActiveNow()) {
+        pipWanted.current = false;
+        setMode(pipReturn.current);
+        setControls(true);
+      }
+    }, 350);
+  };
+
+  useEffect(() => () => { if (pipPoll.current) clearInterval(pipPoll.current); }, []);
+
+  async function goPip(fromFull = true) {
+    if (pipWanted.current) return;
+    const p: any = player;
+    try { if (p?.videoApi?.setAudioOnlyMode) await p.videoApi.setAudioOnlyMode(false); } catch {}
+    try { if (p?.videoApi?.setAudioMixingMode) await p.videoApi.setAudioMixingMode("mix-with-others"); } catch {}
+    try { if (!p?.isPlaying) p?.play?.(); } catch {}
+    // expo-video richiede che la VideoView sia montata per attivare il PiP
+    if (!fromFull) {
+      try { p?.enterPictureInPicture?.(); } catch {}
+      return;
+    }
+    pipReturn.current = "full";
+    pipWanted.current = true;
+    pipLastQuery = Date.now();
+    startPipPoll();
+    NavigationBar.setVisibilityAsync("visible").catch(() => {});
+    const ok = await enterPip(p);
+    setTimeout(() => {
+      if (!pipWanted.current) return;
+      if (ok && isPipActiveNow()) setMode("pip");
+    }, 450);
+  }
+
   useEffect(() => {
     const sub = AppState.addEventListener("change", state => {
-      if (state !== "active" && playingRef.current && settingsRef.current.pip) {
-        const p = player as any;
-        try { if (typeof p.enterPictureInPicture === "function") p.enterPictureInPicture(); else if (typeof p.startPictureInPicture === "function") p.startPictureInPicture(); } catch {}
+      if (state !== "active") {
+        if (playingRef.current && settingsRef.current.pip && modeRef.current === "full" && !pipWanted.current) {
+          goPip(true);
+        }
+      } else if (pipWanted.current) {
+        // L'utente e' tornato in app mentre il video era in PiP: lo riportiamo a schermo pieno
+        pipWanted.current = false;
+        exitPip(player).catch(() => {});
+        setMode(pipReturn.current);
+        setControls(true);
       }
     });
     return () => sub.remove();
@@ -662,8 +790,18 @@ function PlayerProvider({ children }: any) {
     await load({}, it, e, start);
   }
 
-  function minimize() { setMode("mini"); setMenu(null); setLandscape(false); ScreenOrientation.unlockAsync().catch(() => {}); }
+  function minimize() { pipReturn.current = "mini"; setMode("mini"); setMenu(null); setLandscape(false); ScreenOrientation.unlockAsync().catch(() => {}); }
   function expand() { setMode("full"); setControls(true); }
+  async function goPipFromMini() {
+    if (pipWanted.current) return;
+    pipReturn.current = "mini";
+    pipWanted.current = true;
+    pipLastQuery = Date.now();
+    startPipPoll();
+    const ok = await enterPip(player);
+    setTimeout(() => { if (!pipWanted.current && modeRef.current !== "full") setMode(pipReturn.current); }, 1200);
+    if (ok) flash("PiP: apri una VideoView per attivarlo");
+  }
   function close() {
     try { player.pause(); } catch {}
     if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true);
@@ -771,34 +909,101 @@ function PlayerProvider({ children }: any) {
     position, duration, scrubbing, scrub, cues, subIndex, subLoading, notice, ended,
     nextEp, videoSize, landscape, controls, menu, fit,
     setControls, setMenu, setScrub, setFit,
-    open, close, minimize, expand, togglePlay, beginScrub, endScrub, rotate,
+    open, close, minimize, expand, goPip, togglePlay, beginScrub, endScrub, rotate,
     switchAudio, selectSub, setQuality, playEpisode, flash
   };
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
+// VideoView nascosta ma montata: serve per far funzionare il PiP anche dal miniplayer
+function PipMount() {
+  const P = usePlayer();
+  if (P.mode !== "pip") return null;
+  return <VideoView player={P.player} style={{ width: 1, height: 1, position: "absolute", opacity: 0, left: -10 }} nativeControls={false} allowsPictureInPicture />;
+}
+
 function PlayerOverlay() {
   const P = usePlayer();
-  const { settings, setSettings, items, list, toggleList } = useApp();
+  const appCtx = useApp();
+  const { settings, setSettings, items, list, toggleList } = appCtx;
   const dim = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = P.landscape || dim.width > dim.height;
   const drag = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => { if (P.mode === "full") drag.setValue(0); }, [P.mode]);
+  // refs sempre aggiornati, usati dentro il PanResponder creato una sola volta
+  const landRef = useRef(isLandscape); landRef.current = isLandscape;
+  const sizeRef = useRef(dim); sizeRef.current = dim;
+  const insetsRef = useRef(insets); insetsRef.current = insets;
+  const ctxRef = useRef(appCtx); ctxRef.current = appCtx;
+  const pRef = useRef<any>(P); pRef.current = P;
+  const animatingRef = useRef(false);
+  const zoomAnim = useRef(new Animated.Value(0)).current; // 0 = video grande, 1 = mini
+
+  useEffect(() => { if (P.mode === "full") { drag.setValue(0); zoomAnim.setValue(0); animatingRef.current = false; } }, [P.mode]);
+
+  // Notifica di sistema toccata -> expo-video segnala l'uscita dal PiP: torniamo a schermo pieno
+  let pipNow = false;
+  try { pipNow = !!useEvent(P.player as any, "isPictureInPictureActiveChange"); } catch {}
+  useEffect(() => {
+    if (!pipNow) return;
+    pRef.current.setMenu(null);
+    goPipFromAnywhere(true);
+  }, [pipNow]);
+
+  const fullHeight = () => sizeRef.current.height - insetsRef.current.top;
+
+  function springBack() {
+    animatingRef.current = true;
+    Animated.parallel([
+      Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 9, tension: 60 }),
+      Animated.timing(zoomAnim, { toValue: 0, duration: 240, easing: Easing.out(Easing.cubic), useNativeDriver: false })
+    ]).start(() => { animatingRef.current = false; });
+  }
+
+  // VideoView montata (overlay o mini): possiamo attivare il PiP da qualsiasi modalita
+  function goPipFromAnywhere(fromFull: boolean) {
+    const p = ctxRef.current;
+    if (!p || p.pipBusy) return;
+    p.setPipBusy(true);
+    if (fromFull) p.setMode("pip");
+    setTimeout(() => { p.goPip(false); p.setPipBusy(false); }, 60);
+  }
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: (_, g) => !isLandscape && g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.3,
-    onPanResponderMove: (_, g) => drag.setValue(Math.max(0, g.dy)),
-    onPanResponderRelease: (_, g) => {
-      if (g.dy > 110 || g.vy > 0.7) {
-        Animated.timing(drag, { toValue: dim.height + 40, duration: 210, useNativeDriver: true }).start(() => { drag.setValue(0); P.minimize(); });
+    onStartShouldSetPanResponderCapture: () => animatingRef.current,
+    onMoveShouldSetPanResponder: (_, g) => !landRef.current && !animatingRef.current && g.dy > 10 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
+    onPanResponderMove: (_e, g) => {
+      const H = fullHeight();
+      const d = Math.max(0, g.dy);
+      drag.setValue(d);
+      zoomAnim.setValue(Math.min(1, d / (H * 0.85)));
+    },
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderRelease: (_e, g) => {
+      const H = fullHeight();
+      const ratio = Math.min(1, Math.max(0, g.dy / H));
+      if (g.dy > H * 0.55 || g.vy > 0.85) {
+        // swipe deciso fino in fondo: tutto scende e resta il miniplayer
+        animatingRef.current = true;
+        Animated.parallel([
+          Animated.timing(drag, { toValue: H, duration: Math.round(170 + 80 * (1 - ratio)), easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.timing(zoomAnim, { toValue: 1, duration: Math.round(170 + 80 * (1 - ratio)), easing: Easing.out(Easing.quad), useNativeDriver: false })
+        ]).start(() => { animatingRef.current = false; drag.setValue(0); zoomAnim.setValue(0); pRef.current.minimize(); });
+      } else if (ratio > 0.3 && ctxRef.current.settings.pip) {
+        // trascinato a meta': come YouTube -> Picture-in-Picture
+        animatingRef.current = true;
+        Animated.parallel([
+          Animated.timing(drag, { toValue: H, duration: 200, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.timing(zoomAnim, { toValue: 1, duration: 200, easing: Easing.out(Easing.quad), useNativeDriver: false })
+        ]).start(() => { animatingRef.current = false; drag.setValue(0); zoomAnim.setValue(0); goPipFromAnywhere(true); });
       } else {
-        Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        springBack();
       }
     },
-    onPanResponderTerminate: () => Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start()
+    onPanResponderTerminate: () => springBack(),
+    onPanResponderTerminated: () => springBack()
   })).current;
 
   const itemId = P.item?.id;
@@ -811,8 +1016,9 @@ function PlayerOverlay() {
     const similar = items.filter((x: any) => x.id !== P.item.id && x.genres.some((g: string) => P.item.genres.includes(g))).slice(0, 6);
     const activeAudio = P.info?.audio?.find((a: any) => a.Index === P.info.audioIndex);
     const activeSub = (P.info?.subs || []).find((s: any) => s.Index === P.subIndex);
+    const st: any = ctxRef.current.settings;
     return (
-      <ScrollView style={styles.infoPanel} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 30 }}>
+      <Animated.ScrollView style={[styles.infoPanel, { opacity: zoomAnim.interpolate({ inputRange: [0, 0.35, 0.7], outputRange: [1, 0.25, 0], extrapolate: "clamp" }) }]} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 30 }}>
         <Text style={styles.infoTitle}>{P.episode ? P.episode.title : P.item.title}</Text>
         <Text style={styles.infoSub}>{P.episode ? `${P.item.title} · S${P.episode.season}:E${P.episode.episode}` : `${P.item.year} · ${P.item.genres.join(", ")}`}</Text>
         <View style={styles.metaRow}>
