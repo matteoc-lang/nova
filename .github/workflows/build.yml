@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       CI: "1"
     steps:
@@ -52,8 +52,8 @@ jobs:
       - name: Cache Android NDK
         uses: actions/cache@v4
         with:
-          path: /usr/local/lib/android/sdk/ndk/26.1.10909125
-          key: ndk-26.1.10909125-${{ runner.os }}
+          path: /usr/local/lib/android/sdk/ndk
+          key: ndk-ubuntu24-sdk54-v1
 
       - name: Remove UTF-8 BOM from source files
         run: |
@@ -77,13 +77,15 @@ jobs:
         working-directory: nova
         run: |
           missing=0
-          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-navigation-bar expo-secure-store expo-screen-orientation; do
+          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-video expo-linear-gradient expo-navigation-bar expo-secure-store expo-screen-orientation; do
             if [ -d "node_modules/$p" ]; then
               echo "OK      $p  $(node -p "require('./node_modules/$p/package.json').version")"
             else
               echo "MISSING $p"; missing=1
             fi
           done
+          echo "expo    $(node -p "require('./node_modules/expo/package.json').version")"
+          echo "rn      $(node -p "require('./node_modules/react-native/package.json').version")"
           exit $missing
 
       - name: Generate Android project
@@ -105,7 +107,7 @@ jobs:
         run: echo "sdk.dir=$ANDROID_HOME" > nova/android/local.properties
 
       - name: Give Gradle more memory
-        run: echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> nova/android/gradle.properties
+        run: echo "org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g" >> nova/android/gradle.properties
 
       - name: Build RELEASE APK
         working-directory: nova/android
