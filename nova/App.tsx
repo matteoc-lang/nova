@@ -55,7 +55,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.2.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.3.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -241,8 +241,6 @@ function activeCueText(cues: any[], t: number) {
   return out.join("\n");
 }
 
-/* Profilo molto permissivo: ExoPlayer decodifica quasi tutto in locale.
-   Se il device non ce la fa, scatta il fallback automatico al transcoding. */
 function nativeProfile(force: boolean, bitrate: number) {
   return {
     MaxStreamingBitrate: bitrate,
@@ -553,7 +551,6 @@ function PlayerProvider({ children }: any) {
     try { (player as any).showNowPlayingNotification = true; } catch {}
   }, [player]);
 
-  /* Buffer aggressivo: parte quasi subito invece di attendere il riempimento */
   useEffect(() => {
     try {
       (player as any).bufferOptions = {
@@ -795,9 +792,11 @@ function PlayerOverlay() {
     onMoveShouldSetPanResponder: (_, g) => !isLandscape && g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.3,
     onPanResponderMove: (_, g) => drag.setValue(Math.max(0, g.dy)),
     onPanResponderRelease: (_, g) => {
-      if (g.dy > 100 || g.vy > 0.8) {
-        Animated.timing(drag, { toValue: dim.height, duration: 190, useNativeDriver: true }).start(() => { drag.setValue(0); P.minimize(); });
-      } else Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 7, tension: 60 }).start();
+      if (g.dy > 110 || g.vy > 0.7) {
+        Animated.timing(drag, { toValue: dim.height + 40, duration: 210, useNativeDriver: true }).start(() => { drag.setValue(0); P.minimize(); });
+      } else {
+        Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+      }
     },
     onPanResponderTerminate: () => Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start()
   })).current;
@@ -807,7 +806,6 @@ function PlayerOverlay() {
   const infoUrl = P.info?.url;
   const inList = itemId ? list.includes(itemId) : false;
 
-  /* Pannello informativo memoizzato: non si ri-renderizza a ogni tick di posizione */
   const infoPanel = useMemo(() => {
     if (!P.item) return null;
     const similar = items.filter((x: any) => x.id !== P.item.id && x.genres.some((g: string) => P.item.genres.includes(g))).slice(0, 6);
@@ -861,9 +859,18 @@ function PlayerOverlay() {
   const bigSpinner = (P.loading || P.buffering) && !P.started;
   const menuW = Math.min(400, dim.width - 32);
   const menuH = Math.min(dim.height * 0.8, 560);
-  const dragScale = drag.interpolate({ inputRange: [0, 320], outputRange: [1, 0.82], extrapolate: "clamp" });
-  const dragRadius = drag.interpolate({ inputRange: [0, 120], outputRange: [0, 14], extrapolate: "clamp" });
   const zoom = isLandscape ? 1 : (settings.portraitZoom || 1);
+
+  const surfaceScale = drag.interpolate({ inputRange: [0, 260], outputRange: [1, 0.94], extrapolate: "clamp" });
+  const surfaceRadius = drag.interpolate({ inputRange: [0, 120], outputRange: [0, 16], extrapolate: "clamp" });
+  const backdropDim = drag.interpolate({ inputRange: [0, 260], outputRange: [0, 0.55], extrapolate: "clamp" });
+
+  let pipSupport: string = "n/d";
+  try {
+    const pp: any = P.player;
+    if (typeof pp.isPictureInPictureSupported === "function") pipSupport = pp.isPictureInPictureSupported() ? "sì" : "no";
+    else if (typeof pp.isPictureInPictureSupported === "boolean") pipSupport = pp.isPictureInPictureSupported ? "sì" : "no";
+  } catch {}
 
   const subStyle = {
     color: settings.subColor || "#fff",
@@ -881,12 +888,9 @@ function PlayerOverlay() {
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
 
   const videoBlock = (
-    <Animated.View
-      style={[styles.videoBox, { width: vw, height: vh, borderRadius: isLandscape ? 0 : dragRadius, transform: isLandscape ? [] : [{ translateY: drag }, { scale: dragScale }] }]}
-      {...(!isLandscape ? pan.panHandlers : {})}
-    >
+    <View style={[styles.videoBox, { width: vw, height: vh }]}>
       <VideoView player={P.player} style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]} contentFit={isLandscape ? P.fit : "contain"} nativeControls={false} allowsPictureInPicture />
-      <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
+      <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} {...(!isLandscape ? pan.panHandlers : {})} />
 
       {!!subText && <View style={[styles.subBox, { bottom: showControls && isLandscape ? 82 : 14 }]} pointerEvents="none"><Text style={[styles.subText, subStyle]}>{subText}</Text></View>}
 
@@ -954,12 +958,26 @@ function PlayerOverlay() {
           </View>
         </View>
       )}
-    </Animated.View>
+    </View>
   );
 
   return (
-    <View style={[styles.overlayRoot, isLandscape ? styles.overlayLand : { paddingTop: insets.top }]}>
-      {isLandscape ? <View style={styles.landWrap}>{videoBlock}</View> : (<>{videoBlock}{infoPanel}</>)}
+    <View style={[styles.overlayRoot, isLandscape && styles.overlayLand]}>
+      {!isLandscape && (
+        <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: "#000", opacity: backdropDim }]} />
+      )}
+
+      <Animated.View style={[
+        styles.surface,
+        {
+          paddingTop: isLandscape ? 0 : insets.top,
+          borderRadius: isLandscape ? 0 : surfaceRadius,
+          transform: isLandscape ? [] : [{ translateY: drag }, { scale: surfaceScale }]
+        }
+      ]}>
+        {videoBlock}
+        {!isLandscape && infoPanel}
+      </Animated.View>
 
       {!!P.notice && <View style={[styles.notice, { top: isLandscape ? Math.max(insets.top, 12) : insets.top + vh + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View>}
 
@@ -1539,9 +1557,9 @@ const styles = StyleSheet.create({
   similarItem: { width: "31%" },
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
   roundOn: { borderColor: C.green },
-  overlayRoot: { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, zIndex: 100 },
+  overlayRoot: { ...StyleSheet.absoluteFillObject, backgroundColor: "transparent", zIndex: 100 },
   overlayLand: { justifyContent: "center", alignItems: "center", backgroundColor: "#000" },
-  landWrap: { flex: 1, width: "100%", alignItems: "center", justifyContent: "center", backgroundColor: "#000" },
+  surface: { flex: 1, backgroundColor: "#000", overflow: "hidden" },
   videoBox: { backgroundColor: "#000", overflow: "hidden", position: "relative" },
   infoPanel: { flex: 1, backgroundColor: C.bg },
   infoTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginBottom: 4 },
