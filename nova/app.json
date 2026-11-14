@@ -6,21 +6,35 @@
     "scheme": "nova",
     "orientation": "default",
     "userInterfaceStyle": "dark",
+    "backgroundColor": "#08080b",
+    "icon": "./assets/icon.png",
+    "splash": { "backgroundColor": "#08080b", "resizeMode": "contain" },
     "assetBundlePatterns": ["**/*"],
+    "androidStatusBar": {
+      "barStyle": "light-content",
+      "backgroundColor": "#00000000",
+      "translucent": true
+    },
     "android": {
       "package": "com.matteo.nova",
       "versionCode": 1,
       "usesCleartextTraffic": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#08080b"
+      },
       "permissions": [
         "INTERNET",
         "WAKE_LOCK",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "POST_NOTIFICATIONS"
       ]
     },
     "plugins": [
       "expo-secure-store",
-      ["expo-video", { "supportsBackgroundPlayback": true, "supportsPictureInPicture": true }]
+      ["expo-video", { "supportsBackgroundPlayback": true, "supportsPictureInPicture": true }],
+      "expo-navigation-bar"
     ]
   }
 }
