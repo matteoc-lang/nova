@@ -29,7 +29,7 @@ const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background
 const defaultSettings = {
   streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: false,
   autoplay: true, loop: false, speed: 1, posterSize: 150, thumbWide: true,
-  animations: true, progressBars: true, stats: false, saveData: false
+  animations: true, progressBars: true, stats: false, saveData: false, subSize: 18
 };
 
 function fmt(sec: number) {
@@ -47,7 +47,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.5.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="2.0.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -167,39 +167,79 @@ async function loadSeasons(session: any, item: any) {
     .map((s: any) => ({ ...s, episodes: s.episodes.sort((a: any, b: any) => a.episode - b.episode) }));
 }
 
-function setUrlParam(url: string, key: string, value: any) {
-  const qIndex = url.indexOf("?");
-  const base = qIndex >= 0 ? url.slice(0, qIndex) : url;
-  const query = qIndex >= 0 ? url.slice(qIndex + 1) : "";
-  const parts = query.split("&").filter(Boolean).filter(p => {
-    const k = p.split("=")[0];
-    try { return decodeURIComponent(k) !== key; } catch { return k !== key; }
-  });
-  parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(String(value)));
-  return base + "?" + parts.join("&");
+/* ---------- SOTTOTITOLI: scaricati come testo, disegnati sopra il video ---------- */
+
+function isTextSub(s: any) {
+  if (s?.IsTextSubtitleStream === true) return true;
+  if (s?.IsTextSubtitleStream === false) return false;
+  return /^(srt|subrip|ass|ssa|webvtt|vtt|mov_text|text)$/i.test(String(s?.Codec || ""));
 }
 
-function removeUrlParam(url: string, key: string) {
-  const qIndex = url.indexOf("?");
-  if (qIndex < 0) return url;
-  const base = url.slice(0, qIndex);
-  const query = url.slice(qIndex + 1);
-  const parts = query.split("&").filter(Boolean).filter(p => {
-    const k = p.split("=")[0];
-    try { return decodeURIComponent(k) !== key; } catch { return k !== key; }
-  });
-  return parts.length ? base + "?" + parts.join("&") : base;
+async function fetchSubtitleText(session: any, itemId: string, mediaSourceId: string, index: number) {
+  const base = session.server + "/Videos/" + itemId + "/" + mediaSourceId + "/Subtitles/" + index + "/Stream";
+  for (const ext of [".vtt", ".srt"]) {
+    try {
+      const r = await fetch(base + ext + "?api_key=" + session.token);
+      if (r.ok) {
+        const t = await r.text();
+        if (t && t.trim()) return t;
+      }
+    } catch {}
+  }
+  throw new Error("Il server non ha restituito il testo dei sottotitoli.");
 }
 
-function nativeProfile(force: boolean, bitrate: number, burnSubs: boolean) {
+function parseTimestamp(s: string) {
+  const m = String(s).trim().match(/(?:(\d+):)?(\d{1,2}):(\d{1,2})[.,](\d{1,3})/);
+  if (!m) return null;
+  const h = m[1] ? parseInt(m[1], 10) : 0;
+  return h * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10) + parseInt(m[4].padEnd(3, "0"), 10) / 1000;
+}
+
+function cleanSubText(lines: string[]) {
+  return lines
+    .join("\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\{\\[^}]*\}/g, "")
+    .replace(/\{[^}]*\}/g, "")
+    .replace(/\\N/g, "\n")
+    .replace(/\\n/g, "\n")
+    .trim();
+}
+
+function parseSubtitles(raw: string) {
+  const text = String(raw || "").replace(/\r/g, "").replace(/^\uFEFF/, "");
+  const blocks = text.split(/\n{2,}/);
+  const cues: { start: number; end: number; text: string }[] = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").filter(l => l.trim() !== "");
+    if (!lines.length) continue;
+    if (/^WEBVTT/i.test(lines[0])) continue;
+    if (/^(NOTE|STYLE|REGION)/i.test(lines[0])) continue;
+    let i = 0;
+    if (!lines[i].includes("-->")) i = 1;
+    if (i >= lines.length || !lines[i].includes("-->")) continue;
+    const parts = lines[i].split("-->");
+    const start = parseTimestamp(parts[0]);
+    const end = parseTimestamp(parts[1]);
+    if (start == null || end == null) continue;
+    const body = cleanSubText(lines.slice(i + 1));
+    if (!body) continue;
+    cues.push({ start, end, text: body });
+  }
+  cues.sort((a, b) => a.start - b.start);
+  return cues;
+}
+
+/* ---------- STREAM: nessun parametro manipolato a mano ---------- */
+
+function nativeProfile(force: boolean, bitrate: number) {
   return {
     MaxStreamingBitrate: bitrate,
     MaxStaticBitrate: 200000000,
     DirectPlayProfiles: force ? [] : [{ Container: "mp4,m4v,mov,mkv,webm", Type: "Video", VideoCodec: "h264,hevc,vp9,av1", AudioCodec: "aac,mp3,ac3,eac3,opus,flac,vorbis" }],
     TranscodingProfiles: [{ Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac,mp3", Context: "Streaming", Protocol: "hls", MaxAudioChannels: "2", MinSegments: "1", BreakOnNonKeyFrames: true }],
-    SubtitleProfiles: burnSubs
-      ? [{ Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" }, { Format: "ssa", Method: "Encode" }, { Format: "vtt", Method: "Encode" }, { Format: "pgs", Method: "Encode" }, { Format: "dvdsub", Method: "Encode" }]
-      : [{ Format: "srt", Method: "External" }, { Format: "ass", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" }, { Format: "pgs", Method: "Encode" }]
+    SubtitleProfiles: [{ Format: "srt", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "ass", Method: "External" }]
   };
 }
 
@@ -208,8 +248,8 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     return {
       id: itemId, url: opts.demoUrl, method: "DirectPlay", hls: false, quality: opts.quality || "auto",
       duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }],
-      subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null,
-      mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264", startOffset: 0
+      subs: [], audioIndex: 0, mediaSourceId: "demo", playSessionId: "demo",
+      reason: "Demo MP4/H.264", startOffset: 0
     };
   }
 
@@ -220,33 +260,27 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
 
   const startSeconds = Math.max(0, opts.startSeconds || 0);
   const explicitAudio = opts.audioIndex != null ? opts.audioIndex : null;
-  const explicitSub = opts.subtitleIndex != null && opts.subtitleIndex >= 0 ? opts.subtitleIndex : null;
-  const subOff = opts.subtitleIndex === -1;
-  const wantTranscode = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || explicitAudio != null || explicitSub != null || subOff;
+  const force = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || explicitAudio != null;
 
-  const req = async (force: boolean, audioIndex: number | null, subtitleIndex: number | null, burnSubs: boolean) => {
-    const body: any = {
-      DeviceProfile: nativeProfile(force, bitrate, burnSubs),
-      AutoOpenLiveStream: true,
-      MaxStreamingBitrate: bitrate,
-      EnableDirectPlay: !force,
-      EnableDirectStream: !force,
-      EnableTranscoding: true,
-      AllowVideoStreamCopy: !force,
-      AllowAudioStreamCopy: !force
-    };
-    if (startSeconds > 0) body.StartTimeTicks = Math.round(startSeconds * 1e7);
-    if (audioIndex != null) body.AudioStreamIndex = audioIndex;
-    if (subtitleIndex != null && subtitleIndex >= 0) body.SubtitleStreamIndex = subtitleIndex;
-    const r = await fetch(session.server + "/Items/" + itemId + "/PlaybackInfo?userId=" + session.userId, {
-      method: "POST", headers: authHeaders(session.token), body: JSON.stringify(body)
-    });
-    if (!r.ok) throw new Error("PlaybackInfo HTTP " + r.status);
-    return r.json();
+  const body: any = {
+    DeviceProfile: nativeProfile(force, bitrate),
+    AutoOpenLiveStream: true,
+    MaxStreamingBitrate: bitrate,
+    EnableDirectPlay: !force,
+    EnableDirectStream: !force,
+    EnableTranscoding: true,
+    AllowVideoStreamCopy: !force,
+    AllowAudioStreamCopy: !force
   };
+  if (explicitAudio != null) body.AudioStreamIndex = explicitAudio;
+  if (startSeconds > 0) body.StartTimeTicks = Math.round(startSeconds * 1e7);
 
-  let j = await req(wantTranscode, explicitAudio, explicitSub, explicitSub != null);
-  let ms = j.MediaSources && j.MediaSources[0];
+  const r = await fetch(session.server + "/Items/" + itemId + "/PlaybackInfo?userId=" + session.userId, {
+    method: "POST", headers: authHeaders(session.token), body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error("PlaybackInfo HTTP " + r.status);
+  const j = await r.json();
+  const ms = j.MediaSources && j.MediaSources[0];
   if (!ms) throw new Error("Nessuna MediaSource disponibile.");
 
   const audio = (ms.MediaStreams || []).filter((s: any) => s.Type === "Audio");
@@ -257,34 +291,15 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     const pref = audio.find((a: any) => String(a.Language || "").toLowerCase().startsWith(settings.audioLang));
     ai = pref ? pref.Index : ms.DefaultAudioStreamIndex != null ? ms.DefaultAudioStreamIndex : audio[0]?.Index ?? null;
   }
-  let si = explicitSub;
-  if (si == null && !subOff && settings.autoSub) {
-    const p = subs.find((s: any) => String(s.Language || "").toLowerCase().startsWith(settings.subLang));
-    si = p ? p.Index : null;
-  }
-
-  const burnSubs = si != null;
-  const mustForce = wantTranscode || burnSubs || (ai != null && ai !== ms.DefaultAudioStreamIndex);
-  j = await req(mustForce, ai, si, burnSubs);
-  ms = (j.MediaSources && j.MediaSources[0]) || ms;
 
   let url: string, method: string;
-  if (!mustForce && ms.SupportsDirectPlay) {
+  if (!force && ms.SupportsDirectPlay) {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   } else if (ms.TranscodingUrl) {
     url = ms.TranscodingUrl.startsWith("http") ? ms.TranscodingUrl : session.server + ms.TranscodingUrl;
-    if (ai != null) url = setUrlParam(url, "AudioStreamIndex", ai);
-    if (si != null) {
-      url = setUrlParam(url, "SubtitleStreamIndex", si);
-      url = setUrlParam(url, "SubtitleMethod", "Encode");
-    } else {
-      url = removeUrlParam(url, "SubtitleStreamIndex");
-      url = removeUrlParam(url, "SubtitleMethod");
-    }
-    if (startSeconds > 0) url = setUrlParam(url, "StartTimeTicks", Math.round(startSeconds * 1e7));
-    if (!/[?&]api_key=/.test(url)) url = setUrlParam(url, "api_key", session.token);
-    method = mustForce ? "Transcode" : "DirectStream";
+    if (!/[?&]api_key=/.test(url)) url += (url.includes("?") ? "&" : "?") + "api_key=" + session.token;
+    method = force ? "Transcode" : "DirectStream";
   } else {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
@@ -294,9 +309,9 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
   return {
     id: itemId, url, method, hls, quality,
     duration: (ms.RunTimeTicks || 0) / 1e7,
-    audio, subs, audioIndex: ai, subtitleIndex: si,
+    audio, subs, audioIndex: ai,
     mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
-    reason: burnSubs ? "Transcoding con sottotitoli masterizzati" : mustForce ? "Transcoding richiesto o fallback" : "Direct Play nativo",
+    reason: force ? "Transcoding richiesto" : "Direct Play nativo",
     startOffset: hls && startSeconds > 0 ? startSeconds : 0
   };
 }
@@ -527,9 +542,9 @@ function LoginScreen() {
   );
 }
 
-function MenuItem({ label, value, selected, onPress }: any) {
+function MenuItem({ label, value, selected, disabled, onPress }: any) {
   return (
-    <Pressable onPress={onPress} style={styles.menuItem}>
+    <Pressable onPress={disabled ? undefined : onPress} style={[styles.menuItem, disabled && { opacity: 0.45 }]}>
       <Text style={styles.menuItemText}>{label}</Text>
       <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
     </Pressable>
@@ -828,6 +843,10 @@ function PlayerScreen({ route, navigation }: any) {
   const [notice, setNotice] = useState("");
   const [videoSize, setVideoSize] = useState({ w: 16, h: 9 });
 
+  const [cues, setCues] = useState<any[]>([]);
+  const [subIndex, setSubIndex] = useState<number | null>(null);
+  const [subBusy, setSubBusy] = useState(false);
+
   const player = useVideoPlayer(null, p => { p.loop = false; });
   const baseOffset = useRef(0);
   const pendingSeek = useRef<number | null>(null);
@@ -841,10 +860,13 @@ function PlayerScreen({ route, navigation }: any) {
   const optsRef = useRef<any>({});
   const episodeRef = useRef<any>(null);
   const noticeTimer = useRef<any>(null);
+  const subIndexRef = useRef<number | null>(null);
+  const subLangRef = useRef<string>("");
 
   useEffect(() => { infoRef.current = info; }, [info]);
   useEffect(() => { episodeRef.current = episode; }, [episode]);
   useEffect(() => { positionRef.current = position; }, [position]);
+  useEffect(() => { subIndexRef.current = subIndex; }, [subIndex]);
   useEffect(() => () => {
     ScreenOrientation.unlockAsync().catch(() => {});
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
@@ -853,14 +875,40 @@ function PlayerScreen({ route, navigation }: any) {
   function flashNotice(msg: string) {
     setNotice(msg);
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    noticeTimer.current = setTimeout(() => setNotice(""), 2600);
+    noticeTimer.current = setTimeout(() => setNotice(""), 2800);
+  }
+
+  async function loadSubTrack(stream: any, silent = false) {
+    const inf = infoRef.current;
+    if (!inf || !stream) return;
+    if (session.mode === "demo") { if (!silent) flashNotice("Nessun sottotitolo nella demo."); return; }
+    if (!isTextSub(stream)) {
+      if (!silent) flashNotice("Sottotitoli grafici (PGS): serve il transcoding, non supportato qui.");
+      return;
+    }
+    setSubBusy(true);
+    try {
+      const raw = await fetchSubtitleText(session, inf.id, inf.mediaSourceId, stream.Index);
+      const parsed = parseSubtitles(raw);
+      if (!parsed.length) throw new Error("Nessuna battuta leggibile nel file.");
+      setCues(parsed);
+      setSubIndex(stream.Index);
+      subIndexRef.current = stream.Index;
+      subLangRef.current = String(stream.Language || "");
+      if (!silent) flashNotice("Sottotitoli: " + (stream.DisplayTitle || stream.Language || "attivi"));
+    } catch (e: any) {
+      setCues([]); setSubIndex(null); subIndexRef.current = null;
+      if (!silent) flashNotice("Sottotitoli: " + (e.message || "errore"));
+    } finally {
+      setSubBusy(false);
+    }
   }
 
   async function load(opts: any = {}, epArg = episodeRef.current, startAt = 0) {
     if (!item) return;
     setLoading(true); setBuffering(false); setError(""); setEnded(false);
     optsRef.current = { ...optsRef.current, ...opts };
-    seekLock.current = Date.now() + 1500;
+    seekLock.current = Date.now() + 1200;
     try {
       const inf = await getPlayback(session, epArg ? epArg.id : item.id, settings, {
         ...optsRef.current,
@@ -870,13 +918,20 @@ function PlayerScreen({ route, navigation }: any) {
       });
       infoRef.current = inf;
       setInfo(inf);
-      const fullDuration = inf.duration || epArg?.duration || item.duration || 0;
-      setDuration(fullDuration);
+      setDuration(inf.duration || epArg?.duration || item.duration || 0);
       baseOffset.current = inf.startOffset || 0;
       pendingSeek.current = inf.hls ? null : startAt;
       setPosition(startAt);
       positionRef.current = startAt;
       player.replace({ uri: inf.url });
+
+      if (subIndexRef.current != null) {
+        const list = inf.subs || [];
+        const match = list.find((s: any) => s.Index === subIndexRef.current)
+          || list.find((s: any) => String(s.Language || "") === subLangRef.current && isTextSub(s));
+        if (match) loadSubTrack(match, true);
+        else { setCues([]); setSubIndex(null); subIndexRef.current = null; }
+      }
     } catch (e: any) {
       setError(e.message || "Errore di riproduzione.");
       setLoading(false);
@@ -999,7 +1054,7 @@ function PlayerScreen({ route, navigation }: any) {
   function seekTo(target: number) {
     const dur = infoRef.current?.duration || duration || 0;
     const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
-    seekLock.current = Date.now() + 1500;
+    seekLock.current = Date.now() + 1200;
     setPosition(T);
     positionRef.current = T;
     finishedRef.current = false;
@@ -1028,15 +1083,17 @@ function PlayerScreen({ route, navigation }: any) {
     setMenu(null);
     flashNotice("Cambio traccia audio…");
     await load({ audioIndex: index, force: true }, episodeRef.current, positionRef.current);
-    flashNotice("Traccia audio: " + (infoRef.current?.audio?.find((a: any) => a.Index === index)?.DisplayTitle || index));
+    flashNotice("Audio: " + (infoRef.current?.audio?.find((a: any) => a.Index === index)?.DisplayTitle || index));
   }
 
-  async function switchSubs(index: number | null) {
+  function selectSub(stream: any | null) {
     setMenu(null);
-    flashNotice(index == null ? "Disattivo i sottotitoli…" : "Attivo i sottotitoli…");
-    await load({ subtitleIndex: index == null ? -1 : index, force: true }, episodeRef.current, positionRef.current);
-    const label = index == null ? "Disattivati" : (infoRef.current?.subs?.find((s: any) => s.Index === index)?.DisplayTitle || "Attivi");
-    flashNotice("Sottotitoli: " + label);
+    if (!stream) {
+      setCues([]); setSubIndex(null); subIndexRef.current = null; subLangRef.current = "";
+      flashNotice("Sottotitoli disattivati");
+      return;
+    }
+    loadSubTrack(stream);
   }
 
   function playEpisode(ep: any) {
@@ -1045,6 +1102,16 @@ function PlayerScreen({ route, navigation }: any) {
     load({}, ep, 0);
   }
 
+  const activeCue = useMemo(() => {
+    if (!cues.length) return null;
+    const t = position;
+    for (let i = 0; i < cues.length; i++) {
+      if (t >= cues[i].start && t <= cues[i].end) return cues[i];
+      if (cues[i].start > t) break;
+    }
+    return null;
+  }, [cues, position]);
+
   if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
 
   const title = episode ? episode.title : item.title;
@@ -1052,7 +1119,7 @@ function PlayerScreen({ route, navigation }: any) {
   const menuW = Math.min(400, dim.width - 32);
   const menuH = Math.min(dim.height * 0.82, 560);
   const activeAudio = info?.audio?.find((a: any) => a.Index === info.audioIndex);
-  const activeSub = info?.subs?.find((s: any) => s.Index === info.subtitleIndex);
+  const activeSub = (info?.subs || []).find((s: any) => s.Index === subIndex);
   const busy = loading || buffering;
 
   const aspect = videoSize.w && videoSize.h ? videoSize.w / videoSize.h : 16 / 9;
@@ -1069,6 +1136,14 @@ function PlayerScreen({ route, navigation }: any) {
       </View>
 
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setControls(v => !v)} />
+
+      {!!activeCue && !error && (
+        <View style={[styles.subBox, { bottom: controls ? insets.bottom + 108 : insets.bottom + 36 }]} pointerEvents="none">
+          <Text style={[styles.subText, { fontSize: settings.subSize, lineHeight: settings.subSize * 1.32 }]}>
+            {activeCue.text}
+          </Text>
+        </View>
+      )}
 
       {!!notice && <View style={[styles.notice, { top: insets.top + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
 
@@ -1089,7 +1164,7 @@ function PlayerScreen({ route, navigation }: any) {
           <Text style={styles.statsLine}>Qualità: {info.quality}</Text>
           <Text style={styles.statsLine}>Posizione: {fmt(position)} / {fmt(duration)}</Text>
           <Text style={styles.statsLine}>Audio: {activeAudio?.DisplayTitle || activeAudio?.Language || "default"}</Text>
-          <Text style={styles.statsLine}>Sub: {activeSub?.DisplayTitle || "off"}</Text>
+          <Text style={styles.statsLine}>Sub: {activeSub?.DisplayTitle || "off"} ({cues.length} battute)</Text>
           <Text style={styles.statsLine}>{info.reason}</Text>
         </View>
       )}
@@ -1118,7 +1193,9 @@ function PlayerScreen({ route, navigation }: any) {
               <Text style={styles.playerTime}>{fmt(scrubbing ? scrub : position)} <Text style={styles.faint}>/ {fmt(duration)}</Text></Text>
               <View style={{ flex: 1 }} />
               <IconButton name="musical-notes-outline" onPress={() => setMenu("audio")} />
-              <IconButton name="chatbox-ellipses-outline" onPress={() => setMenu("subs")} />
+              <Pressable onPress={() => setMenu("subs")} style={[styles.iconButton, subIndex != null && styles.iconActive]}>
+                <Ionicons name="chatbox-ellipses-outline" size={22} color={C.text} />
+              </Pressable>
               <Pressable onPress={() => setMenu("quality")} style={styles.hdButton}>
                 <View style={styles.hdBox}>
                   <Text style={styles.hdText}>{info?.quality && info.quality !== "auto" ? info.quality + "p" : "HD"}</Text>
@@ -1130,7 +1207,7 @@ function PlayerScreen({ route, navigation }: any) {
         </>
       )}
 
-      {busy ? (
+      {(busy || subBusy) ? (
         <View style={styles.centerSpin} pointerEvents="none">
           <ActivityIndicator color={C.red} size="large" />
         </View>
@@ -1173,13 +1250,14 @@ function PlayerScreen({ route, navigation }: any) {
       )}
 
       <Modal visible={!!menu} transparent animationType="fade" onRequestClose={() => setMenu(null)}>
-        <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]}>
+        <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => setMenu(null)}>
           <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
             <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
               {menu === "root" && (
                 <>
                   <MenuHeader title="Impostazioni player" onBack={() => setMenu(null)} onClose={() => setMenu(null)} />
                   <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => setMenu("speed")} />
+                  <MenuItem label="Dimensione sottotitoli" value={settings.subSize + "px"} onPress={() => setMenu("subsize")} />
                   <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
                   <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
                   <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
@@ -1195,33 +1273,48 @@ function PlayerScreen({ route, navigation }: any) {
                   ))}
                 </>
               )}
+              {menu === "subsize" && (
+                <>
+                  <MenuHeader title="Dimensione sottotitoli" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
+                  {[14, 16, 18, 20, 24, 28, 32].map(s => (
+                    <MenuItem key={s} label={s + " px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />
+                  ))}
+                </>
+              )}
               {menu === "quality" && (
                 <>
                   <MenuHeader title="Qualità" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
                   {["auto", "2160", "1080", "720", "480", "360"].map(q => (
-                    <MenuItem key={q} label={q === "auto" ? "Automatica" : q + "p"} selected={String(info?.quality) === q}
+                    <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(info?.quality) === q}
                       onPress={() => { setMenu(null); flashNotice("Qualità: " + (q === "auto" ? "auto" : q + "p")); load({ quality: q, force: q !== "auto" }, episodeRef.current, positionRef.current); }} />
                   ))}
+                  <Text style={styles.menuNote}>Le qualità inferiori ad "auto" attivano il transcoding del server.</Text>
                 </>
               )}
               {menu === "audio" && (
                 <>
                   <MenuHeader title="Audio" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  {(info?.audio || []).length === 0 && <Text style={styles.menuNote}>Questo file non espone tracce audio selezionabili.</Text>}
+                  {(info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia audio selezionabile.</Text>}
                   {(info?.audio || []).map((a: any) => (
                     <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={info?.audioIndex === a.Index} onPress={() => switchAudio(a.Index)} />
                   ))}
-                  <Text style={styles.menuNote}>Cambiando audio il server ricrea lo stream dalla posizione attuale.</Text>
+                  <Text style={styles.menuNote}>Il cambio audio ricarica lo stream mantenendo la posizione.</Text>
                 </>
               )}
               {menu === "subs" && (
                 <>
                   <MenuHeader title="Sottotitoli" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  <MenuItem label="Disattivati" selected={info?.subtitleIndex == null} onPress={() => switchSubs(null)} />
+                  <MenuItem label="Disattivati" selected={subIndex == null} onPress={() => selectSub(null)} />
                   {(info?.subs || []).map((s: any) => (
-                    <MenuItem key={s.Index} label={s.DisplayTitle || s.Language || "Sottotitoli " + s.Index} selected={info?.subtitleIndex === s.Index} onPress={() => switchSubs(s.Index)} />
+                    <MenuItem
+                      key={s.Index}
+                      label={(s.DisplayTitle || s.Language || "Sottotitoli " + s.Index) + (isTextSub(s) ? "" : "  · grafico")}
+                      selected={subIndex === s.Index}
+                      disabled={!isTextSub(s)}
+                      onPress={() => selectSub(s)} />
                   ))}
-                  <Text style={styles.menuNote}>I sottotitoli vengono masterizzati dal server: la selezione ricarica lo stream mantenendo la posizione.</Text>
+                  {(info?.subs || []).length === 0 && <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text>}
+                  <Text style={styles.menuNote}>I sottotitoli di testo vengono scaricati e disegnati sopra il video: nessun transcoding, la riproduzione non si interrompe.</Text>
                 </>
               )}
             </ScrollView>
@@ -1288,7 +1381,7 @@ function SettingsScreen({ navigation }: any) {
           <Text style={styles.sectionTitle}>Audio e sottotitoli</Text>
           <Choice label="Lingua audio" value={settings.audioLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, audioLang: v })} />
           <Choice label="Lingua sottotitoli" value={settings.subLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
-          <Toggle label="Sottotitoli automatici" value={settings.autoSub} onToggle={() => setSettings({ ...settings, autoSub: !settings.autoSub })} />
+          <Choice label="Dimensione sottotitoli" value={settings.subSize} options={[[14, "14"], [16, "16"], [18, "18"], [20, "20"], [24, "24"], [28, "28"], [32, "32"]]} onChange={(v: number) => setSettings({ ...settings, subSize: v })} />
           <Toggle label="Statistiche riproduzione" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
         </View>
 
@@ -1439,6 +1532,7 @@ const styles = StyleSheet.create({
   topBar: { paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
   topLogo: { color: C.red, fontSize: 26, fontWeight: "900", letterSpacing: 1 },
   iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
+  iconActive: { backgroundColor: "#ffffff22" },
   pressed: { backgroundColor: "#ffffff1c" },
   face: { backgroundColor: C.red, alignItems: "center", justifyContent: "center" },
   profileMenu: { width: "88%", maxWidth: 400, backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
@@ -1506,6 +1600,8 @@ const styles = StyleSheet.create({
   roundOn: { borderColor: C.green },
   playerRoot: { flex: 1, backgroundColor: "#000" },
   videoWrap: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", backgroundColor: "#000" },
+  subBox: { position: "absolute", left: 16, right: 16, alignItems: "center", zIndex: 15 },
+  subText: { color: "#fff", fontWeight: "600", textAlign: "center", textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4, backgroundColor: "rgba(0,0,0,0.45)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, overflow: "hidden" },
   centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center", zIndex: 60 },
   playerError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.95)", alignItems: "center", justifyContent: "center", padding: 24, gap: 12, zIndex: 50 },
   notice: { position: "absolute", top: 70, alignSelf: "center", backgroundColor: "rgba(8,8,11,0.9)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, maxWidth: "86%", zIndex: 55 },
