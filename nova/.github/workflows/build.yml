@@ -71,16 +71,7 @@ jobs:
 
       - name: Install JS dependencies
         working-directory: nova
-        run: npm install --no-audit --no-fund
-
-      - name: Align Expo SDK versions
-        working-directory: nova
-        run: npx expo install --fix
-
-      - name: Install ALL required Expo packages explicitly
-        working-directory: nova
-        run: |
-          npx expo install expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-av expo-video expo-linear-gradient expo-navigation-bar expo-secure-store expo-screen-orientation @expo/vector-icons @react-native-async-storage/async-storage @react-native-community/slider react-native-safe-area-context react-native-screens
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Verify required packages are present
         working-directory: nova
@@ -95,12 +86,30 @@ jobs:
           done
           exit $missing
 
-      - name: Generate app icons
-        working-directory: nova
+      - name: Generate app icons (isolated sharp)
         run: |
-          npm install --no-save sharp@0.33.5
-          node scripts/gen-icons.mjs
-          ls -la assets/
+          set -e
+          mkdir -p /tmp/icongen
+          cp nova/assets/icon.svg /tmp/icongen/icon.svg
+          cp nova/assets/icon-foreground.svg /tmp/icongen/icon-foreground.svg
+          cd /tmp/icongen
+          npm init -y >/dev/null 2>&1
+          npm install sharp@0.33.5 --no-audit --no-fund --legacy-peer-deps
+          cat > gen.mjs <<'EOF'
+          import sharp from "sharp";
+          import { readFileSync } from "node:fs";
+          const icon = readFileSync("icon.svg");
+          const fg = readFileSync("icon-foreground.svg");
+          await sharp(icon).resize(1024,1024).png().toFile("icon.png");
+          await sharp(fg).resize(1024,1024).png().toFile("adaptive-icon.png");
+          await sharp(icon).resize(48,48).png().toFile("favicon.png");
+          await sharp(fg).resize(512,512).png().toFile("splash-icon.png");
+          console.log("icons ok");
+          EOF
+          node gen.mjs
+          mkdir -p "$GITHUB_WORKSPACE/nova/assets"
+          cp icon.png adaptive-icon.png favicon.png splash-icon.png "$GITHUB_WORKSPACE/nova/assets/"
+          ls -la "$GITHUB_WORKSPACE/nova/assets/"
 
       - name: Generate Android project
         working-directory: nova
