@@ -7,7 +7,7 @@ import { useEventListener } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import * as ScreenOrientation from "expo-screen-orientation";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -47,7 +47,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.2.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.3.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -178,54 +178,90 @@ function nativeProfile(force: boolean, bitrate: number) {
 
 async function getPlayback(session: any, itemId: string, settings: any, opts: any = {}) {
   if (session.mode === "demo") {
-    return { id: itemId, url: opts.demoUrl, method: "DirectPlay", quality: opts.quality || "auto", duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }], subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null, mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264", startOffset: 0 };
+    return {
+      id: itemId, url: opts.demoUrl, method: "DirectPlay", hls: false, quality: opts.quality || "auto",
+      duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }],
+      subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null,
+      mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264", startOffset: 0
+    };
   }
+
   const quality = opts.quality || settings.quality || "auto";
   const rates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
   let bitrate = rates[quality] || 40000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
-  let force = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || opts.audioIndex != null || (opts.subtitleIndex != null && opts.subtitleIndex >= 0);
+
   const startSeconds = Math.max(0, opts.startSeconds || 0);
-  const req = async (f: boolean) => {
+  const explicitAudio = opts.audioIndex != null ? opts.audioIndex : null;
+  const explicitSub = opts.subtitleIndex != null && opts.subtitleIndex >= 0 ? opts.subtitleIndex : null;
+  const subOff = opts.subtitleIndex === -1;
+  const wantTranscode = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || explicitAudio != null || explicitSub != null || subOff;
+
+  const req = async (force: boolean, audioIndex: number | null, subtitleIndex: number | null) => {
+    const body: any = {
+      DeviceProfile: nativeProfile(force, bitrate),
+      AutoOpenLiveStream: true,
+      MaxStreamingBitrate: bitrate,
+      StartTimeTicks: Math.round(startSeconds * 1e7),
+      EnableDirectPlay: !force,
+      EnableDirectStream: !force,
+      EnableTranscoding: true,
+      AllowVideoStreamCopy: !force,
+      AllowAudioStreamCopy: !force
+    };
+    if (audioIndex != null) body.AudioStreamIndex = audioIndex;
+    if (subtitleIndex != null && subtitleIndex >= 0) body.SubtitleStreamIndex = subtitleIndex;
     const r = await fetch(session.server + "/Items/" + itemId + "/PlaybackInfo?userId=" + session.userId, {
-      method: "POST", headers: authHeaders(session.token),
-      body: JSON.stringify({ DeviceProfile: nativeProfile(f, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate, StartTimeTicks: Math.round(startSeconds * 1e7) })
+      method: "POST", headers: authHeaders(session.token), body: JSON.stringify(body)
     });
     if (!r.ok) throw new Error("PlaybackInfo HTTP " + r.status);
     return r.json();
   };
-  let j = await req(force);
+
+  let j = await req(wantTranscode, explicitAudio, explicitSub);
   let ms = j.MediaSources && j.MediaSources[0];
   if (!ms) throw new Error("Nessuna MediaSource disponibile.");
+
   const audio = (ms.MediaStreams || []).filter((s: any) => s.Type === "Audio");
   const subs = (ms.MediaStreams || []).filter((s: any) => s.Type === "Subtitle");
-  let ai = opts.audioIndex;
+
+  let ai = explicitAudio;
   if (ai == null) {
     const pref = audio.find((a: any) => String(a.Language || "").toLowerCase().startsWith(settings.audioLang));
-    ai = pref ? pref.Index : ms.DefaultAudioStreamIndex != null ? ms.DefaultAudioStreamIndex : audio[0]?.Index;
+    ai = pref ? pref.Index : ms.DefaultAudioStreamIndex != null ? ms.DefaultAudioStreamIndex : audio[0]?.Index ?? null;
   }
-  let si = opts.subtitleIndex;
-  if (si === -1) si = null;
-  if (si == null && settings.autoSub && opts.subtitleIndex !== -1) {
+  let si = explicitSub;
+  if (si == null && !subOff && settings.autoSub) {
     const p = subs.find((s: any) => String(s.Language || "").toLowerCase().startsWith(settings.subLang));
     si = p ? p.Index : null;
   }
-  if (!force && si != null) { force = true; j = await req(true); ms = j.MediaSources[0] || ms; }
+
+  const mustForce = wantTranscode || si != null || (ai != null && ai !== ms.DefaultAudioStreamIndex);
+  j = await req(mustForce, ai, si);
+  ms = (j.MediaSources && j.MediaSources[0]) || ms;
+
   let url: string, method: string;
-  if (!force && ms.SupportsDirectPlay) {
+  if (!mustForce && ms.SupportsDirectPlay) {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   } else if (ms.TranscodingUrl) {
-    url = session.server + ms.TranscodingUrl + (ms.TranscodingUrl.includes("?") ? "&" : "?") + "api_key=" + session.token;
-    if (ai != null) url += "&AudioStreamIndex=" + ai;
-    if (si != null) url += "&SubtitleStreamIndex=" + si;
-    if (startSeconds > 0) url += "&StartTimeTicks=" + Math.round(startSeconds * 1e7);
-    method = ms.SupportsDirectStream ? "DirectStream" : "Transcode";
+    url = ms.TranscodingUrl.startsWith("http") ? ms.TranscodingUrl : session.server + ms.TranscodingUrl;
+    if (!/[?&]api_key=/.test(url)) url += (url.includes("?") ? "&" : "?") + "api_key=" + session.token;
+    method = mustForce ? "Transcode" : "DirectStream";
   } else {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   }
-  return { id: itemId, url, method, quality, duration: (ms.RunTimeTicks || 0) / 1e7, audio, subs, audioIndex: ai, subtitleIndex: si, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId, reason: force ? "Transcoding richiesto o fallback" : "Direct Play nativo", startOffset: method === "Transcode" ? startSeconds : 0 };
+
+  const hls = /\.m3u8/i.test(url);
+  return {
+    id: itemId, url, method, hls, quality,
+    duration: (ms.RunTimeTicks || 0) / 1e7,
+    audio, subs, audioIndex: ai, subtitleIndex: si,
+    mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
+    reason: mustForce ? "Transcoding richiesto o fallback" : "Direct Play nativo",
+    startOffset: hls ? startSeconds : 0
+  };
 }
 
 async function reportPlayback(session: any, kind: string, info: any, position: number, paused: boolean) {
@@ -234,7 +270,10 @@ async function reportPlayback(session: any, kind: string, info: any, position: n
   try {
     await fetch(session.server + path, {
       method: "POST", headers: authHeaders(session.token),
-      body: JSON.stringify({ ItemId: info.id, MediaSourceId: info.mediaSourceId, PlaySessionId: info.playSessionId, PositionTicks: Math.round((position || 0) * 1e7), PlayMethod: info.method, CanSeek: true, IsPaused: paused })
+      body: JSON.stringify({
+        ItemId: info.id, MediaSourceId: info.mediaSourceId, PlaySessionId: info.playSessionId,
+        PositionTicks: Math.round((position || 0) * 1e7), PlayMethod: info.method, CanSeek: true, IsPaused: paused
+      })
     });
   } catch {}
 }
@@ -451,15 +490,71 @@ function LoginScreen() {
   );
 }
 
-function TopBar({ navigation }: any) {
+function MenuItem({ label, value, selected, onPress }: any) {
   return (
-    <View style={styles.topBar}>
-      <Text style={styles.topLogo}>NOVA</Text>
+    <Pressable onPress={onPress} style={styles.menuItem}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
+    </Pressable>
+  );
+}
+
+function MenuToggle({ label, value, onToggle }: any) {
+  return (
+    <Pressable onPress={onToggle} style={styles.menuItem}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
+    </Pressable>
+  );
+}
+
+function MenuHeader({ title, onBack, onClose }: any) {
+  return (
+    <View style={styles.menuHeader}>
+      <IconButton name="chevron-back" size={20} onPress={onBack} />
+      <Text style={styles.menuHeaderText}>{title}</Text>
       <View style={{ flex: 1 }} />
-      <IconButton name="search" onPress={() => navigation.navigate("Search")} />
-      <IconButton name="settings-outline" onPress={() => navigation.navigate("Settings")} />
-      <Face size={34} />
+      <IconButton name="close" size={20} onPress={onClose} />
     </View>
+  );
+}
+
+function TopBar({ navigation }: any) {
+  const { session, setSession, reloadLibrary, resetLocal } = useApp();
+  const insets = useSafeAreaInsets();
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
+
+  return (
+    <>
+      <View style={[styles.topBar, { paddingTop: insets.top, height: 62 + insets.top }]}>
+        <Text style={styles.topLogo}>NOVA</Text>
+        <View style={{ flex: 1 }} />
+        <IconButton name="search" onPress={() => navigation.navigate("Search")} />
+        <IconButton name="settings-outline" onPress={() => navigation.navigate("Settings")} />
+        <Pressable onPress={() => setOpen(true)} style={({ pressed }) => pressed && { opacity: 0.75 }}>
+          <Face size={34} />
+        </Pressable>
+      </View>
+
+      <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
+        <Pressable style={styles.modalBackdrop} onPress={close}>
+          <Pressable style={styles.profileMenu} onPress={() => {}}>
+            <View style={styles.profileHead}>
+              <Face size={54} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.profileName}>{session?.user || "Matteo"}</Text>
+                <Text style={styles.muted} numberOfLines={1}>{session?.mode === "demo" ? "Modalità demo" : session?.server}</Text>
+              </View>
+            </View>
+            <MenuItem label="Impostazioni" onPress={() => { close(); navigation.navigate("Settings"); }} />
+            <MenuItem label="Ricarica libreria" onPress={() => { close(); reloadLibrary(); }} />
+            <MenuItem label="Esci" onPress={() => { close(); setSession(null); }} />
+            <MenuItem label="Ripara dati locali" onPress={() => { close(); resetLocal(); }} />
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 
@@ -671,38 +766,10 @@ function DetailScreen({ route, navigation }: any) {
   );
 }
 
-function MenuItem({ label, value, selected, onPress }: any) {
-  return (
-    <Pressable onPress={onPress} style={styles.menuItem}>
-      <Text style={styles.menuItemText}>{label}</Text>
-      <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
-    </Pressable>
-  );
-}
-
-function MenuToggle({ label, value, onToggle }: any) {
-  return (
-    <Pressable onPress={onToggle} style={styles.menuItem}>
-      <Text style={styles.menuItemText}>{label}</Text>
-      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
-    </Pressable>
-  );
-}
-
-function MenuHeader({ title, onBack, onClose }: any) {
-  return (
-    <View style={styles.menuHeader}>
-      <IconButton name="chevron-back" size={20} onPress={onBack} />
-      <Text style={styles.menuHeaderText}>{title}</Text>
-      <View style={{ flex: 1 }} />
-      <IconButton name="close" size={20} onPress={onClose} />
-    </View>
-  );
-}
-
 function PlayerScreen({ route, navigation }: any) {
   const { session, items, epMap, progress, settings, setSettings, saveProgress } = useApp();
   const dim = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const item = items.find((x: any) => x.id === route.params.itemId);
 
   const [episode, setEpisode] = useState<any>(route.params.episode || epMap[route.params.episodeId] || null);
@@ -739,7 +806,10 @@ function PlayerScreen({ route, navigation }: any) {
   useEffect(() => { infoRef.current = info; }, [info]);
   useEffect(() => { episodeRef.current = episode; }, [episode]);
   useEffect(() => { positionRef.current = position; }, [position]);
-  useEffect(() => () => { ScreenOrientation.unlockAsync().catch(() => {}); if (noticeTimer.current) clearTimeout(noticeTimer.current); }, []);
+  useEffect(() => () => {
+    ScreenOrientation.unlockAsync().catch(() => {});
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+  }, []);
 
   function flashNotice(msg: string) {
     setNotice(msg);
@@ -763,7 +833,7 @@ function PlayerScreen({ route, navigation }: any) {
       const fullDuration = inf.duration || epArg?.duration || item.duration || 0;
       setDuration(fullDuration);
       baseOffset.current = inf.startOffset || 0;
-      pendingClientSeek.current = inf.method === "Transcode" ? null : startAt;
+      pendingClientSeek.current = inf.hls ? null : startAt;
       setPosition(startAt);
       positionRef.current = startAt;
       player.replace({ uri: inf.url });
@@ -786,9 +856,8 @@ function PlayerScreen({ route, navigation }: any) {
       setEpisode(ep);
       episodeRef.current = ep;
       const id = ep ? ep.id : item.id;
-      const start = route.params.resume ?? (progress[id]?.position || 0);
-      if (isWatched(progress[id])) start === 0;
-      await load({}, ep, isWatched(progress[id]) ? 0 : start);
+      const start = isWatched(progress[id]) ? 0 : (route.params.resume ?? (progress[id]?.position || 0));
+      await load({}, ep, start);
     })();
     return () => {
       alive = false;
@@ -882,7 +951,7 @@ function PlayerScreen({ route, navigation }: any) {
     seekLock.current = Date.now() + 1200;
     setPosition(T); positionRef.current = T;
     finishedRef.current = false;
-    if (infoRef.current?.method === "Transcode") {
+    if (infoRef.current?.hls) {
       await load(optsRef.current, episodeRef.current, T);
     } else {
       try { player.currentTime = T; } catch {}
@@ -941,10 +1010,10 @@ function PlayerScreen({ route, navigation }: any) {
 
       {loading && <View style={styles.playerLoading} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>}
 
-      {!!notice && <View style={styles.notice} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
+      {!!notice && <View style={[styles.notice, { top: insets.top + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
 
       {!!error && (
-        <View style={styles.playerError}>
+        <View style={[styles.playerError, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
           <Ionicons name="warning-outline" size={48} color={C.amber} />
           <Text style={styles.emptyTitle}>Video non caricabile</Text>
           <Text style={styles.muted}>{error}</Text>
@@ -954,7 +1023,7 @@ function PlayerScreen({ route, navigation }: any) {
       )}
 
       {settings.stats && info && !error && (
-        <View style={[styles.statsPanel, { top: controls ? 72 : 16 }]} pointerEvents="none">
+        <View style={[styles.statsPanel, { top: controls ? insets.top + 64 : insets.top + 8 }]} pointerEvents="none">
           <Text style={styles.statsTitle}>STATISTICHE</Text>
           <Text style={styles.statsLine}>Metodo: {info.method}</Text>
           <Text style={styles.statsLine}>Qualità: {info.quality}</Text>
@@ -969,7 +1038,7 @@ function PlayerScreen({ route, navigation }: any) {
       {controls && !ended && !error && (
         <>
           <LinearGradient colors={["rgba(0,0,0,0.75)", "transparent"]} style={styles.playerTopScrim} pointerEvents="none" />
-          <View style={styles.playerTop}>
+          <View style={[styles.playerTop, { top: insets.top + 8 }]}>
             <IconButton name="arrow-back" size={26} onPress={() => navigation.goBack()} />
             <View style={{ flex: 1 }}>
               <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text>
@@ -983,7 +1052,7 @@ function PlayerScreen({ route, navigation }: any) {
           </Pressable>
 
           <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.playerBottomScrim} pointerEvents="none" />
-          <View style={styles.playerBottom}>
+          <View style={[styles.playerBottom, { bottom: insets.bottom + 8 }]}>
             <Slider style={{ width: "100%", height: 34 }} minimumValue={0} maximumValue={Math.max(1, duration)}
               value={scrubbing ? scrub : position} minimumTrackTintColor={C.red}
               maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
@@ -1007,7 +1076,7 @@ function PlayerScreen({ route, navigation }: any) {
       )}
 
       {ended && (
-        <View style={styles.endOverlay}>
+        <View style={[styles.endOverlay, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
           {nextEp ? (
             <>
               <Text style={styles.endLabel}>Prossimo episodio</Text>
@@ -1039,7 +1108,7 @@ function PlayerScreen({ route, navigation }: any) {
       )}
 
       <Modal visible={!!menu} transparent animationType="fade" onRequestClose={() => setMenu(null)}>
-        <Pressable style={styles.modalBackdrop} onPress={() => setMenu(null)}>
+        <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]}>
           <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
             <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
               {menu === "root" && (
@@ -1302,11 +1371,14 @@ const styles = StyleSheet.create({
   divider: { flexDirection: "row", alignItems: "center", gap: 10, marginVertical: 16 },
   dividerLine: { flex: 1, height: 1, backgroundColor: C.line },
   dividerText: { color: C.faint, fontSize: 12 },
-  topBar: { height: 62, paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
+  topBar: { paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
   topLogo: { color: C.red, fontSize: 26, fontWeight: "900", letterSpacing: 1 },
   iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
   pressed: { backgroundColor: "#ffffff1c" },
   face: { backgroundColor: C.red, alignItems: "center", justifyContent: "center" },
+  profileMenu: { width: "88%", maxWidth: 400, backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
+  profileHead: { flexDirection: "row", alignItems: "center", gap: 14, padding: 18, borderBottomWidth: 1, borderBottomColor: C.line },
+  profileName: { color: C.text, fontSize: 18, fontWeight: "800", marginBottom: 3 },
   hero: { height: 560, justifyContent: "flex-end" },
   heroContent: { padding: 20, paddingBottom: 34 },
   heroKickerRow: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 },
