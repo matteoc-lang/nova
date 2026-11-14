@@ -1,0 +1,17 @@
+﻿{
+  "expo": {
+    "name": "NOVA",
+    "slug": "nova-jellyfin",
+    "version": "1.0.0",
+    "scheme": "nova",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.matteo.nova",
+      "versionCode": 1,
+      "permissions": ["INTERNET"]
+    },
+    "plugins": ["expo-secure-store"]
+  }
+}
