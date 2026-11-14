@@ -47,7 +47,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.3.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.4.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -167,12 +167,39 @@ async function loadSeasons(session: any, item: any) {
     .map((s: any) => ({ ...s, episodes: s.episodes.sort((a: any, b: any) => a.episode - b.episode) }));
 }
 
-function nativeProfile(force: boolean, bitrate: number) {
+function setUrlParam(url: string, key: string, value: any) {
+  const qIndex = url.indexOf("?");
+  const base = qIndex >= 0 ? url.slice(0, qIndex) : url;
+  const query = qIndex >= 0 ? url.slice(qIndex + 1) : "";
+  const parts = query.split("&").filter(Boolean).filter(p => {
+    const k = p.split("=")[0];
+    try { return decodeURIComponent(k) !== key; } catch { return k !== key; }
+  });
+  parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(String(value)));
+  return base + "?" + parts.join("&");
+}
+
+function removeUrlParam(url: string, key: string) {
+  const qIndex = url.indexOf("?");
+  if (qIndex < 0) return url;
+  const base = url.slice(0, qIndex);
+  const query = url.slice(qIndex + 1);
+  const parts = query.split("&").filter(Boolean).filter(p => {
+    const k = p.split("=")[0];
+    try { return decodeURIComponent(k) !== key; } catch { return k !== key; }
+  });
+  return parts.length ? base + "?" + parts.join("&") : base;
+}
+
+function nativeProfile(force: boolean, bitrate: number, burnSubs: boolean) {
   return {
-    MaxStreamingBitrate: bitrate, MaxStaticBitrate: 200000000,
+    MaxStreamingBitrate: bitrate,
+    MaxStaticBitrate: 200000000,
     DirectPlayProfiles: force ? [] : [{ Container: "mp4,m4v,mov,mkv,webm", Type: "Video", VideoCodec: "h264,hevc,vp9,av1", AudioCodec: "aac,mp3,ac3,eac3,opus,flac,vorbis" }],
     TranscodingProfiles: [{ Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac,mp3", Context: "Streaming", Protocol: "hls", MaxAudioChannels: "2", MinSegments: "1", BreakOnNonKeyFrames: true }],
-    SubtitleProfiles: [{ Format: "srt", Method: "External" }, { Format: "ass", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" }, { Format: "pgs", Method: "Encode" }]
+    SubtitleProfiles: burnSubs
+      ? [{ Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" }, { Format: "ssa", Method: "Encode" }, { Format: "vtt", Method: "Encode" }, { Format: "pgs", Method: "Encode" }, { Format: "dvdsub", Method: "Encode" }]
+      : [{ Format: "srt", Method: "External" }, { Format: "ass", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" }, { Format: "pgs", Method: "Encode" }]
   };
 }
 
@@ -182,7 +209,7 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
       id: itemId, url: opts.demoUrl, method: "DirectPlay", hls: false, quality: opts.quality || "auto",
       duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }],
       subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null,
-      mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264", startOffset: 0
+      mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264"
     };
   }
 
@@ -191,18 +218,16 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
   let bitrate = rates[quality] || 40000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
 
-  const startSeconds = Math.max(0, opts.startSeconds || 0);
   const explicitAudio = opts.audioIndex != null ? opts.audioIndex : null;
   const explicitSub = opts.subtitleIndex != null && opts.subtitleIndex >= 0 ? opts.subtitleIndex : null;
   const subOff = opts.subtitleIndex === -1;
   const wantTranscode = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || explicitAudio != null || explicitSub != null || subOff;
 
-  const req = async (force: boolean, audioIndex: number | null, subtitleIndex: number | null) => {
+  const req = async (force: boolean, audioIndex: number | null, subtitleIndex: number | null, burnSubs: boolean) => {
     const body: any = {
-      DeviceProfile: nativeProfile(force, bitrate),
+      DeviceProfile: nativeProfile(force, bitrate, burnSubs),
       AutoOpenLiveStream: true,
       MaxStreamingBitrate: bitrate,
-      StartTimeTicks: Math.round(startSeconds * 1e7),
       EnableDirectPlay: !force,
       EnableDirectStream: !force,
       EnableTranscoding: true,
@@ -218,7 +243,7 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     return r.json();
   };
 
-  let j = await req(wantTranscode, explicitAudio, explicitSub);
+  let j = await req(wantTranscode, explicitAudio, explicitSub, explicitSub != null);
   let ms = j.MediaSources && j.MediaSources[0];
   if (!ms) throw new Error("Nessuna MediaSource disponibile.");
 
@@ -236,8 +261,9 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     si = p ? p.Index : null;
   }
 
-  const mustForce = wantTranscode || si != null || (ai != null && ai !== ms.DefaultAudioStreamIndex);
-  j = await req(mustForce, ai, si);
+  const burnSubs = si != null;
+  const mustForce = wantTranscode || burnSubs || (ai != null && ai !== ms.DefaultAudioStreamIndex);
+  j = await req(mustForce, ai, si, burnSubs);
   ms = (j.MediaSources && j.MediaSources[0]) || ms;
 
   let url: string, method: string;
@@ -246,21 +272,28 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     method = "DirectPlay";
   } else if (ms.TranscodingUrl) {
     url = ms.TranscodingUrl.startsWith("http") ? ms.TranscodingUrl : session.server + ms.TranscodingUrl;
-    if (!/[?&]api_key=/.test(url)) url += (url.includes("?") ? "&" : "?") + "api_key=" + session.token;
+    url = removeUrlParam(url, "StartTimeTicks");
+    if (ai != null) url = setUrlParam(url, "AudioStreamIndex", ai);
+    if (si != null) {
+      url = setUrlParam(url, "SubtitleStreamIndex", si);
+      url = setUrlParam(url, "SubtitleMethod", "Encode");
+    } else {
+      url = removeUrlParam(url, "SubtitleStreamIndex");
+      url = removeUrlParam(url, "SubtitleMethod");
+    }
+    if (!/[?&]api_key=/.test(url)) url = setUrlParam(url, "api_key", session.token);
     method = mustForce ? "Transcode" : "DirectStream";
   } else {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   }
 
-  const hls = /\.m3u8/i.test(url);
   return {
-    id: itemId, url, method, hls, quality,
+    id: itemId, url, method, hls: /\.m3u8/i.test(url), quality,
     duration: (ms.RunTimeTicks || 0) / 1e7,
     audio, subs, audioIndex: ai, subtitleIndex: si,
     mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
-    reason: mustForce ? "Transcoding richiesto o fallback" : "Direct Play nativo",
-    startOffset: hls ? startSeconds : 0
+    reason: burnSubs ? "Transcoding con sottotitoli masterizzati" : mustForce ? "Transcoding richiesto o fallback" : "Direct Play nativo"
   };
 }
 
@@ -790,8 +823,7 @@ function PlayerScreen({ route, navigation }: any) {
   const [notice, setNotice] = useState("");
 
   const player = useVideoPlayer(null, p => { p.loop = false; });
-  const baseOffset = useRef(0);
-  const pendingClientSeek = useRef<number | null>(null);
+  const pendingSeek = useRef<number | null>(null);
   const seekLock = useRef(0);
   const scrubbingRef = useRef(false);
   const finishedRef = useRef(false);
@@ -824,7 +856,6 @@ function PlayerScreen({ route, navigation }: any) {
     try {
       const inf = await getPlayback(session, epArg ? epArg.id : item.id, settings, {
         ...optsRef.current,
-        startSeconds: startAt,
         demoUrl: epArg?.video || item.video,
         duration: epArg?.duration || item.duration
       });
@@ -832,8 +863,7 @@ function PlayerScreen({ route, navigation }: any) {
       setInfo(inf);
       const fullDuration = inf.duration || epArg?.duration || item.duration || 0;
       setDuration(fullDuration);
-      baseOffset.current = inf.startOffset || 0;
-      pendingClientSeek.current = inf.hls ? null : startAt;
+      pendingSeek.current = startAt;
       setPosition(startAt);
       positionRef.current = startAt;
       player.replace({ uri: inf.url });
@@ -867,9 +897,9 @@ function PlayerScreen({ route, navigation }: any) {
 
   useEventListener(player, "statusChange", ({ status, error }: any) => {
     if (status === "readyToPlay") {
-      if (pendingClientSeek.current != null) {
-        const t = pendingClientSeek.current;
-        pendingClientSeek.current = null;
+      if (pendingSeek.current != null) {
+        const t = pendingSeek.current;
+        pendingSeek.current = null;
         try { player.currentTime = t; } catch {}
       }
       try { player.play(); } catch {}
@@ -890,17 +920,17 @@ function PlayerScreen({ route, navigation }: any) {
 
   useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
     if (scrubbingRef.current || Date.now() < seekLock.current) return;
-    const truePos = baseOffset.current + (currentTime || 0);
-    positionRef.current = truePos;
-    setPosition(truePos);
-    const dur = player.duration || infoRef.current?.duration || 0;
-    if (dur > 0) setDuration(infoRef.current?.duration || dur);
+    const pos = currentTime || 0;
+    positionRef.current = pos;
+    setPosition(pos);
+    const dur = infoRef.current?.duration || player.duration || 0;
+    if (dur > 0) setDuration(dur);
     const id = episodeRef.current ? episodeRef.current.id : item.id;
     if (Date.now() - lastSave.current > 5000 && dur > 0) {
       lastSave.current = Date.now();
-      saveProgress(id, truePos, infoRef.current?.duration || dur);
+      saveProgress(id, pos, dur);
     }
-    if (infoRef.current?.duration && truePos >= infoRef.current.duration - 1 && !finishedRef.current) {
+    if (dur > 0 && pos >= dur - 1 && !finishedRef.current) {
       finishedRef.current = true;
       handleEnd();
     }
@@ -921,10 +951,10 @@ function PlayerScreen({ route, navigation }: any) {
   }, [info?.url]);
 
   useEffect(() => {
-    if (!controls || !playing || menu) return;
+    if (!controls || !playing || menu || loading) return;
     const t = setTimeout(() => setControls(false), 4000);
     return () => clearTimeout(t);
-  }, [controls, playing, menu]);
+  }, [controls, playing, menu, loading]);
 
   useEffect(() => {
     if (!ended || !nextEp || !settings.autoplay) return;
@@ -935,7 +965,8 @@ function PlayerScreen({ route, navigation }: any) {
 
   async function handleEnd() {
     const id = episodeRef.current ? episodeRef.current.id : item.id;
-    saveProgress(id, infoRef.current?.duration || duration, infoRef.current?.duration || duration);
+    const dur = infoRef.current?.duration || duration;
+    saveProgress(id, dur, dur);
     let nx = null;
     if (item.type === "series" && episodeRef.current) {
       const ss = await loadSeasons(session, item);
@@ -945,20 +976,18 @@ function PlayerScreen({ route, navigation }: any) {
     setEnded(true);
   }
 
-  async function seekTo(target: number) {
+  function seekTo(target: number) {
     const dur = infoRef.current?.duration || duration || 0;
     const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
-    seekLock.current = Date.now() + 1200;
-    setPosition(T); positionRef.current = T;
+    seekLock.current = Date.now() + 900;
+    setPosition(T);
+    positionRef.current = T;
     finishedRef.current = false;
-    if (infoRef.current?.hls) {
-      await load(optsRef.current, episodeRef.current, T);
-    } else {
-      try { player.currentTime = T; } catch {}
-    }
+    try { player.currentTime = T; } catch {}
   }
 
-  async function togglePlay() {
+  function togglePlay() {
+    if (loading) return;
     if (playing) player.pause(); else player.play();
     setControls(true);
   }
@@ -1008,7 +1037,11 @@ function PlayerScreen({ route, navigation }: any) {
 
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setControls(v => !v)} />
 
-      {loading && <View style={styles.playerLoading} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>}
+      {loading && (
+        <View style={styles.centerSpin} pointerEvents="none">
+          <ActivityIndicator color={C.red} size="large" />
+        </View>
+      )}
 
       {!!notice && <View style={[styles.notice, { top: insets.top + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
 
@@ -1027,7 +1060,6 @@ function PlayerScreen({ route, navigation }: any) {
           <Text style={styles.statsTitle}>STATISTICHE</Text>
           <Text style={styles.statsLine}>Metodo: {info.method}</Text>
           <Text style={styles.statsLine}>Qualità: {info.quality}</Text>
-          <Text style={styles.statsLine}>Offset server: {fmt(baseOffset.current)}</Text>
           <Text style={styles.statsLine}>Posizione: {fmt(position)} / {fmt(duration)}</Text>
           <Text style={styles.statsLine}>Audio: {activeAudio?.DisplayTitle || activeAudio?.Language || "default"}</Text>
           <Text style={styles.statsLine}>Sub: {activeSub?.DisplayTitle || "off"}</Text>
@@ -1047,9 +1079,11 @@ function PlayerScreen({ route, navigation }: any) {
             <IconButton name="sync-outline" size={24} onPress={rotate} />
           </View>
 
-          <Pressable onPress={togglePlay} style={styles.centerPlay} hitSlop={30}>
-            <Ionicons name={playing ? "pause" : "play"} size={62} color="#fff" style={styles.centerIcon} />
-          </Pressable>
+          {!loading && (
+            <Pressable onPress={togglePlay} style={styles.centerPlay} hitSlop={30}>
+              <Ionicons name={playing ? "pause" : "play"} size={62} color="#fff" style={styles.centerIcon} />
+            </Pressable>
+          )}
 
           <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.playerBottomScrim} pointerEvents="none" />
           <View style={[styles.playerBottom, { bottom: insets.bottom + 8 }]}>
@@ -1440,7 +1474,7 @@ const styles = StyleSheet.create({
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
   roundOn: { borderColor: C.green },
   playerRoot: { flex: 1, backgroundColor: "#000" },
-  playerLoading: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
+  centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center" },
   playerError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.95)", alignItems: "center", justifyContent: "center", padding: 24, gap: 12 },
   notice: { position: "absolute", top: 70, alignSelf: "center", backgroundColor: "rgba(8,8,11,0.9)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, maxWidth: "86%" },
   noticeText: { color: C.text, fontSize: 13, fontWeight: "700", textAlign: "center" },
