@@ -34,8 +34,10 @@ const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background
 const defaultSettings = {
   streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: true,
   autoplay: true, loop: false, speed: 1, posterSize: 150, thumbWide: true,
-  animations: true, progressBars: true, stats: false, saveData: false, subSize: 16,
-  background: true, pip: true
+  animations: true, progressBars: true, stats: false, saveData: false,
+  background: true, pip: true,
+  subSize: 16, subBg: false, subColor: "#ffffff", subOutline: true, subBold: true,
+  portraitZoom: 1.0, rotateBottom: true, fastStart: true
 };
 
 function fmt(sec: number) {
@@ -53,7 +55,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.1.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.2.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -239,12 +241,27 @@ function activeCueText(cues: any[], t: number) {
   return out.join("\n");
 }
 
+/* Profilo molto permissivo: ExoPlayer decodifica quasi tutto in locale.
+   Se il device non ce la fa, scatta il fallback automatico al transcoding. */
 function nativeProfile(force: boolean, bitrate: number) {
   return {
-    MaxStreamingBitrate: bitrate, MaxStaticBitrate: 200000000,
-    DirectPlayProfiles: force ? [] : [{ Container: "mp4,m4v,mov,mkv,webm", Type: "Video", VideoCodec: "h264,hevc,vp9,av1", AudioCodec: "aac,mp3,ac3,eac3,opus,flac,vorbis" }],
-    TranscodingProfiles: [{ Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac,mp3", Context: "Streaming", Protocol: "hls", MaxAudioChannels: "2", MinSegments: "1", BreakOnNonKeyFrames: true }],
-    SubtitleProfiles: [{ Format: "srt", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "ass", Method: "External" }]
+    MaxStreamingBitrate: bitrate,
+    MaxStaticBitrate: 400000000,
+    DirectPlayProfiles: force ? [] : [
+      {
+        Container: "mp4,m4v,mov,mkv,webm,avi,ts,m2ts,mts,flv,mpg,mpeg,wmv",
+        Type: "Video",
+        VideoCodec: "h264,hevc,h265,vp8,vp9,av1,mpeg4,mpeg2video",
+        AudioCodec: "aac,mp3,mp2,ac3,eac3,dts,truehd,opus,flac,vorbis,alac,pcm_s16le,pcm_s24le"
+      }
+    ],
+    TranscodingProfiles: [
+      { Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac", Context: "Streaming", Protocol: "hls", MaxAudioChannels: "6", MinSegments: "1", BreakOnNonKeyFrames: true }
+    ],
+    SubtitleProfiles: [
+      { Format: "srt", Method: "External" }, { Format: "vtt", Method: "External" },
+      { Format: "ass", Method: "External" }, { Format: "ssa", Method: "External" }
+    ]
   };
 }
 
@@ -257,8 +274,8 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     };
   }
   const quality = opts.quality || settings.quality || "auto";
-  const rates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
-  let bitrate = rates[quality] || 40000000;
+  const rates: any = { auto: 120000000, 2160: 60000000, 1080: 12000000, 720: 5000000, 480: 2000000, 360: 900000 };
+  let bitrate = rates[quality] || 120000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
   const startSeconds = Math.max(0, opts.startSeconds || 0);
   const explicitAudio = opts.audioIndex != null ? opts.audioIndex : null;
@@ -266,8 +283,8 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
 
   const body: any = {
     DeviceProfile: nativeProfile(force, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate,
-    EnableDirectPlay: !force, EnableDirectStream: !force, EnableTranscoding: true,
-    AllowVideoStreamCopy: !force, AllowAudioStreamCopy: !force
+    EnableDirectPlay: !force, EnableDirectStream: true, EnableTranscoding: true,
+    AllowVideoStreamCopy: true, AllowAudioStreamCopy: true
   };
   if (explicitAudio != null) body.AudioStreamIndex = explicitAudio;
   if (startSeconds > 0) body.StartTimeTicks = Math.round(startSeconds * 1e7);
@@ -302,7 +319,8 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
   return {
     id: itemId, url, method, hls, quality, duration: (ms.RunTimeTicks || 0) / 1e7,
     audio, subs, audioIndex: ai, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
-    reason: force ? "Transcoding" : "Direct Play", startOffset: hls && startSeconds > 0 ? startSeconds : 0
+    reason: force ? "Transcoding" : (method === "DirectPlay" ? "Direct Play (nessuna conversione)" : "Direct Stream (remux)"),
+    startOffset: hls && startSeconds > 0 ? startSeconds : 0
   };
 }
 
@@ -530,10 +548,22 @@ function PlayerProvider({ children }: any) {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   useEffect(() => {
-    try { (player as any).timeUpdateEventInterval = 0.2; } catch {}
+    try { (player as any).timeUpdateEventInterval = 0.25; } catch {}
     try { player.staysActiveInBackground = true; } catch {}
     try { (player as any).showNowPlayingNotification = true; } catch {}
   }, [player]);
+
+  /* Buffer aggressivo: parte quasi subito invece di attendere il riempimento */
+  useEffect(() => {
+    try {
+      (player as any).bufferOptions = {
+        preferredForwardBufferDuration: settings.fastStart ? 25 : 50,
+        minBufferForPlayback: settings.fastStart ? 1 : 5,
+        waitsForMinBufferDuration: !settings.fastStart,
+        prioritizeTimeOverSizeThresholds: true
+      };
+    } catch {}
+  }, [player, settings.fastStart]);
 
   useEffect(() => {
     try { player.playbackRate = settings.speed; } catch {}
@@ -597,7 +627,7 @@ function PlayerProvider({ children }: any) {
     if (!itArg || !session) return;
     setLoading(true); setError(""); setEnded(false);
     optsRef.current = { ...optsRef.current, ...opts };
-    seekLock.current = Date.now() + 1200;
+    seekLock.current = Date.now() + 1000;
     try {
       const inf = await getPlayback(session, epArg ? epArg.id : itArg.id, settingsRef.current, {
         ...optsRef.current, startSeconds: startAt, demoUrl: epArg?.video || itArg.video, duration: epArg?.duration || itArg.duration
@@ -635,10 +665,7 @@ function PlayerProvider({ children }: any) {
     await load({}, it, e, start);
   }
 
-  function minimize() {
-    setMode("mini"); setMenu(null); setLandscape(false);
-    ScreenOrientation.unlockAsync().catch(() => {});
-  }
+  function minimize() { setMode("mini"); setMenu(null); setLandscape(false); ScreenOrientation.unlockAsync().catch(() => {}); }
   function expand() { setMode("full"); setControls(true); }
   function close() {
     try { player.pause(); } catch {}
@@ -656,8 +683,10 @@ function PlayerProvider({ children }: any) {
     } else if (status === "loading") setBuffering(true);
     else if (status === "error") {
       setBuffering(false);
-      if (!retried.current && infoRef.current?.method === "DirectPlay") { retried.current = true; flash("Formato non supportato: transcoding…"); load({ force: true }, itemRef.current, episodeRef.current, positionRef.current); }
-      else { setError(err?.message || "Stream non decodificabile."); setLoading(false); }
+      if (!retried.current && infoRef.current?.method !== "Transcode") {
+        retried.current = true; flash("Formato non supportato: transcoding…");
+        load({ force: true }, itemRef.current, episodeRef.current, positionRef.current);
+      } else { setError(err?.message || "Stream non decodificabile."); setLoading(false); }
     }
   });
 
@@ -711,7 +740,7 @@ function PlayerProvider({ children }: any) {
     const dur = infoRef.current?.duration || duration || 0;
     const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
     scrubbingRef.current = false; setScrubbing(false);
-    seekLock.current = Date.now() + 1200;
+    seekLock.current = Date.now() + 1000;
     setPosition(T); positionRef.current = T; finishedRef.current = false; setEnded(false);
     if (infoRef.current?.hls) load(optsRef.current, itemRef.current, episodeRef.current, T);
     else { try { player.currentTime = T; } catch {} }
@@ -768,41 +797,98 @@ function PlayerOverlay() {
     onPanResponderRelease: (_, g) => {
       if (g.dy > 100 || g.vy > 0.8) {
         Animated.timing(drag, { toValue: dim.height, duration: 190, useNativeDriver: true }).start(() => { drag.setValue(0); P.minimize(); });
-      } else {
-        Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 7, tension: 60 }).start();
-      }
+      } else Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 7, tension: 60 }).start();
     },
     onPanResponderTerminate: () => Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start()
   })).current;
+
+  const itemId = P.item?.id;
+  const epId = P.episode?.id;
+  const infoUrl = P.info?.url;
+  const inList = itemId ? list.includes(itemId) : false;
+
+  /* Pannello informativo memoizzato: non si ri-renderizza a ogni tick di posizione */
+  const infoPanel = useMemo(() => {
+    if (!P.item) return null;
+    const similar = items.filter((x: any) => x.id !== P.item.id && x.genres.some((g: string) => P.item.genres.includes(g))).slice(0, 6);
+    const activeAudio = P.info?.audio?.find((a: any) => a.Index === P.info.audioIndex);
+    const activeSub = (P.info?.subs || []).find((s: any) => s.Index === P.subIndex);
+    return (
+      <ScrollView style={styles.infoPanel} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 30 }}>
+        <Text style={styles.infoTitle}>{P.episode ? P.episode.title : P.item.title}</Text>
+        <Text style={styles.infoSub}>{P.episode ? `${P.item.title} · S${P.episode.season}:E${P.episode.episode}` : `${P.item.year} · ${P.item.genres.join(", ")}`}</Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.match}>{P.item.match}% compatibile</Text>
+          <Text style={styles.badge}>{P.item.rating}</Text>
+          <Text style={styles.badge}>{P.info?.method || "—"}</Text>
+        </View>
+        <View style={[styles.actions, { marginVertical: 14 }]}>
+          <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={24} color={inList ? C.green : "#fff"} /></Pressable>
+          <Pressable onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }} style={styles.ghostButton}><Ionicons name="information-circle-outline" size={20} color="#fff" /><Text style={styles.ghostButtonText}>Dettagli</Text></Pressable>
+        </View>
+        {!!P.episode?.overview && <Text style={styles.infoDesc}>{P.episode.overview}</Text>}
+        {!!P.item.overview && <Text style={styles.infoDesc}>{P.item.overview}</Text>}
+        <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{P.item.genres.join(", ") || "–"}</Text>
+        <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{(P.item.cast || []).join(", ") || "–"}</Text>
+        {settings.stats && P.info && (
+          <View style={styles.statsInline}>
+            <Text style={styles.statsTitle}>STATISTICHE</Text>
+            <Text style={styles.statsLine}>Metodo {P.info.method} · Qualità {P.info.quality}</Text>
+            <Text style={styles.statsLine}>Audio {activeAudio?.DisplayTitle || "default"}</Text>
+            <Text style={styles.statsLine}>Sub {activeSub?.DisplayTitle || "off"} · {P.cues.length} battute</Text>
+            <Text style={styles.statsLine}>{P.info.reason}</Text>
+          </View>
+        )}
+        {!!similar.length && (
+          <>
+            <Text style={styles.sectionTitle}>Altri titoli simili</Text>
+            <View style={styles.similarGrid}>
+              {similar.map((x: any) => <View key={x.id} style={styles.similarItem}><MediaCard item={x} width="100%" onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: x.id }); }} /></View>)}
+            </View>
+          </>
+        )}
+      </ScrollView>
+    );
+  }, [itemId, epId, infoUrl, inList, settings.stats, P.subIndex, P.cues.length, insets.bottom]);
 
   if (P.mode !== "full" || !P.item) return null;
 
   const aspect = P.videoSize.w && P.videoSize.h ? P.videoSize.w / P.videoSize.h : 16 / 9;
   const vw = dim.width;
-  const vh = isLandscape ? dim.height : Math.min(dim.width / aspect, dim.height * 0.42);
+  const vh = isLandscape ? dim.height : Math.min(dim.width / aspect, dim.height * 0.45);
   const subText = activeCueText(P.cues, P.position);
   const showControls = isLandscape ? P.controls : true;
   const bigSpinner = (P.loading || P.buffering) && !P.started;
-  const title = P.episode ? P.episode.title : P.item.title;
-  const seriesLine = P.episode ? `${P.item.title} · S${P.episode.season}:E${P.episode.episode}` : `${P.item.year} · ${P.item.genres.join(", ")}`;
   const menuW = Math.min(400, dim.width - 32);
   const menuH = Math.min(dim.height * 0.8, 560);
-  const inList = list.includes(P.item.id);
-  const activeAudio = P.info?.audio?.find((a: any) => a.Index === P.info.audioIndex);
-  const activeSub = (P.info?.subs || []).find((s: any) => s.Index === P.subIndex);
-  const similar = items.filter((x: any) => x.id !== P.item.id && x.genres.some((g: string) => P.item.genres.includes(g))).slice(0, 6);
   const dragScale = drag.interpolate({ inputRange: [0, 320], outputRange: [1, 0.82], extrapolate: "clamp" });
   const dragRadius = drag.interpolate({ inputRange: [0, 120], outputRange: [0, 14], extrapolate: "clamp" });
+  const zoom = isLandscape ? 1 : (settings.portraitZoom || 1);
+
+  const subStyle = {
+    color: settings.subColor || "#fff",
+    fontSize: settings.subSize,
+    lineHeight: settings.subSize * 1.32,
+    fontWeight: (settings.subBold ? "700" : "500") as any,
+    backgroundColor: settings.subBg ? "rgba(0,0,0,0.55)" : "transparent",
+    paddingHorizontal: settings.subBg ? 9 : 0,
+    paddingVertical: settings.subBg ? 4 : 0,
+    textShadowColor: settings.subOutline ? "#000" : "transparent",
+    textShadowRadius: settings.subOutline ? 5 : 0,
+    textShadowOffset: { width: 0, height: 1 }
+  };
+
+  const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
 
   const videoBlock = (
     <Animated.View
       style={[styles.videoBox, { width: vw, height: vh, borderRadius: isLandscape ? 0 : dragRadius, transform: isLandscape ? [] : [{ translateY: drag }, { scale: dragScale }] }]}
       {...(!isLandscape ? pan.panHandlers : {})}
     >
-      <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit={isLandscape ? P.fit : "contain"} nativeControls={false} allowsPictureInPicture />
+      <VideoView player={P.player} style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]} contentFit={isLandscape ? P.fit : "contain"} nativeControls={false} allowsPictureInPicture />
       <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
 
-      {!!subText && <View style={[styles.subBox, { bottom: showControls && isLandscape ? 82 : 14 }]} pointerEvents="none"><Text style={[styles.subText, { fontSize: settings.subSize, lineHeight: settings.subSize * 1.3 }]}>{subText}</Text></View>}
+      {!!subText && <View style={[styles.subBox, { bottom: showControls && isLandscape ? 82 : 14 }]} pointerEvents="none"><Text style={[styles.subText, subStyle]}>{subText}</Text></View>}
 
       {bigSpinner && <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>}
       {showControls && !bigSpinner && !P.ended && !P.error && (
@@ -816,12 +902,10 @@ function PlayerOverlay() {
           <LinearGradient colors={["rgba(0,0,0,0.7)", "transparent"]} style={styles.vTopScrim} pointerEvents="none" />
           <View style={[styles.vTop, { top: isLandscape ? Math.max(insets.top, 4) : 4 }]}>
             <IconButton name="chevron-down" size={26} onPress={P.minimize} />
-            <View style={{ flex: 1 }}>
-              {isLandscape && <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text>}
-            </View>
+            <View style={{ flex: 1 }}>{isLandscape && <Text numberOfLines={1} style={styles.playerTitle}>{P.episode ? P.episode.title : P.item.title}</Text>}</View>
             {P.buffering && P.started && <ActivityIndicator color={C.red} size="small" style={{ marginRight: 6 }} />}
             {isLandscape && <IconButton name={P.fit === "contain" ? "scan-outline" : "contract-outline"} size={22} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />}
-            <IconButton name="sync-outline" size={22} onPress={P.rotate} />
+            {!settings.rotateBottom && rotateBtn}
           </View>
 
           <LinearGradient colors={["transparent", "rgba(0,0,0,0.8)"]} style={styles.vBottomScrim} pointerEvents="none" />
@@ -836,6 +920,7 @@ function PlayerOverlay() {
               <IconButton name="chatbox-ellipses-outline" size={20} active={P.subIndex != null} onPress={() => P.setMenu("subs")} />
               <Pressable onPress={() => P.setMenu("quality")} style={styles.hdButton}><View style={styles.hdBox}><Text style={styles.hdText}>{P.info?.quality && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View></Pressable>
               <IconButton name="settings-outline" size={20} onPress={() => P.setMenu("root")} />
+              {!!settings.rotateBottom && rotateBtn}
             </View>
           </View>
         </>
@@ -874,86 +959,68 @@ function PlayerOverlay() {
 
   return (
     <View style={[styles.overlayRoot, isLandscape ? styles.overlayLand : { paddingTop: insets.top }]}>
-      {isLandscape ? <View style={styles.landWrap}>{videoBlock}</View> : (
-        <>
-          {videoBlock}
-          <ScrollView style={styles.infoPanel} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 30 }}>
-            <Text style={styles.infoTitle}>{title}</Text>
-            <Text style={styles.infoSub}>{seriesLine}</Text>
-            <View style={styles.metaRow}>
-              <Text style={styles.match}>{P.item.match}% compatibile</Text>
-              <Text style={styles.badge}>{P.item.rating}</Text>
-              <Text style={styles.badge}>{P.info?.method || "—"}</Text>
-              {P.subLoading && <Text style={styles.subLoading}>carico sottotitoli…</Text>}
-            </View>
-            <View style={[styles.actions, { marginVertical: 14 }]}>
-              <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={24} color={inList ? C.green : "#fff"} /></Pressable>
-              <Pressable onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }} style={styles.ghostButton}><Ionicons name="information-circle-outline" size={20} color="#fff" /><Text style={styles.ghostButtonText}>Dettagli</Text></Pressable>
-            </View>
-            {!!P.episode?.overview && <Text style={styles.infoDesc}>{P.episode.overview}</Text>}
-            {!!P.item.overview && <Text style={styles.infoDesc}>{P.item.overview}</Text>}
-            <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{P.item.genres.join(", ") || "–"}</Text>
-            <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{(P.item.cast || []).join(", ") || "–"}</Text>
-            {settings.stats && P.info && (
-              <View style={styles.statsInline}>
-                <Text style={styles.statsTitle}>STATISTICHE</Text>
-                <Text style={styles.statsLine}>Metodo {P.info.method} · Qualità {P.info.quality}</Text>
-                <Text style={styles.statsLine}>Audio {activeAudio?.DisplayTitle || "default"}</Text>
-                <Text style={styles.statsLine}>Sub {activeSub?.DisplayTitle || "off"} · {P.cues.length} battute</Text>
-                <Text style={styles.statsLine}>{P.info.reason}</Text>
-              </View>
-            )}
-            {!!similar.length && (
-              <>
-                <Text style={styles.sectionTitle}>Altri titoli simili</Text>
-                <View style={styles.similarGrid}>
-                  {similar.map((x: any) => <View key={x.id} style={styles.similarItem}><MediaCard item={x} width="100%" onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: x.id }); }} /></View>)}
-                </View>
-              </>
-            )}
-          </ScrollView>
-        </>
-      )}
+      {isLandscape ? <View style={styles.landWrap}>{videoBlock}</View> : (<>{videoBlock}{infoPanel}</>)}
 
       {!!P.notice && <View style={[styles.notice, { top: isLandscape ? Math.max(insets.top, 12) : insets.top + vh + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View>}
 
-      <Modal visible={!!P.menu} transparent animationType="fade" onRequestClose={() => P.setMenu(null)}>
-        <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => P.setMenu(null)}>
-          <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
-            <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
-              {P.menu === "root" && (
-                <>
-                  <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
-                  <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
-                  <MenuItem label="Dimensione sottotitoli" value={settings.subSize + "px"} onPress={() => P.setMenu("subsize")} />
-                  <MenuItem label="Riempimento schermo" value={P.fit === "contain" ? "Adatta" : "Riempi"} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />
-                  <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
-                  <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
-                  <MenuToggle label="Background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
-                  <MenuToggle label="Picture-in-Picture" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
-                  <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
-                  <MenuItem label="Ruota schermo" value={P.landscape ? "Orizzontale" : "Verticale"} onPress={P.rotate} />
-                  <MenuItem label="Miniplayer" onPress={() => { P.setMenu(null); P.minimize(); }} />
-                  <MenuItem label="Chiudi video" onPress={() => { P.setMenu(null); P.close(); }} />
-                </>
-              )}
-              {P.menu === "speed" && (<><MenuHeader title="Velocità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />)}</>)}
-              {P.menu === "subsize" && (<><MenuHeader title="Dimensione sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{[14, 16, 18, 20, 24, 28, 32].map(s => <MenuItem key={s} label={s + " px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />)}</>)}
-              {P.menu === "quality" && (<><MenuHeader title="Qualità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{["auto", "2160", "1080", "720", "480", "360"].map(q => <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(P.info?.quality) === q} onPress={() => P.setQuality(q)} />)}</>)}
-              {P.menu === "audio" && (<><MenuHeader title="Audio" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{(P.info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia selezionabile.</Text>}{(P.info?.audio || []).map((a: any) => <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={P.info?.audioIndex === a.Index} onPress={() => P.switchAudio(a.Index)} />)}</>)}
-              {P.menu === "subs" && (
-                <>
-                  <MenuHeader title="Sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
-                  {P.subLoading && <Text style={styles.menuNote}>Caricamento… il video continua.</Text>}
-                  <MenuItem label="Disattivati" selected={P.subIndex == null} onPress={() => P.selectSub(null)} />
-                  {(P.info?.subs || []).map((s: any) => <MenuItem key={s.Index} label={(s.DisplayTitle || s.Language || "Sub " + s.Index) + (isTextSub(s) ? "" : "  · grafico")} selected={P.subIndex === s.Index} disabled={!isTextSub(s)} onPress={() => P.selectSub(s)} />)}
-                  {(P.info?.subs || []).length === 0 && <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text>}
-                </>
-              )}
-            </ScrollView>
+      {!!P.menu && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => P.setMenu(null)}>
+          <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => P.setMenu(null)}>
+            <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
+              <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
+                {P.menu === "root" && (
+                  <>
+                    <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
+                    <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
+                    <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
+                    <MenuItem label="Zoom verticale" value={Math.round((settings.portraitZoom || 1) * 100) + "%"} onPress={() => P.setMenu("zoom")} />
+                    <MenuItem label="Riempimento schermo" value={P.fit === "contain" ? "Adatta" : "Riempi"} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />
+                    <MenuToggle label="Tasto rotazione in basso" value={settings.rotateBottom} onToggle={() => setSettings({ ...settings, rotateBottom: !settings.rotateBottom })} />
+                    <MenuToggle label="Avvio rapido" value={settings.fastStart} onToggle={() => setSettings({ ...settings, fastStart: !settings.fastStart })} />
+                    <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
+                    <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
+                    <MenuToggle label="Background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
+                    <MenuToggle label="Picture-in-Picture" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
+                    <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
+                    <MenuItem label="Miniplayer" onPress={() => { P.setMenu(null); P.minimize(); }} />
+                    <MenuItem label="Chiudi video" onPress={() => { P.setMenu(null); P.close(); }} />
+                  </>
+                )}
+                {P.menu === "substyle" && (
+                  <>
+                    <MenuHeader title="Stile sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    <MenuToggle label="Sfondo" value={settings.subBg} onToggle={() => setSettings({ ...settings, subBg: !settings.subBg })} />
+                    <MenuToggle label="Bordo / ombra" value={settings.subOutline} onToggle={() => setSettings({ ...settings, subOutline: !settings.subOutline })} />
+                    <MenuToggle label="Grassetto" value={settings.subBold} onToggle={() => setSettings({ ...settings, subBold: !settings.subBold })} />
+                    {[14, 16, 18, 20, 24, 28, 32].map(s => <MenuItem key={s} label={"Dimensione " + s + "px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />)}
+                    {[["#ffffff", "Bianco"], ["#ffe600", "Giallo"], ["#7CFC00", "Verde"], ["#00e5ff", "Ciano"]].map(c => <MenuItem key={c[0]} label={"Colore " + c[1]} selected={settings.subColor === c[0]} onPress={() => setSettings({ ...settings, subColor: c[0] })} />)}
+                  </>
+                )}
+                {P.menu === "zoom" && (
+                  <>
+                    <MenuHeader title="Zoom verticale" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {[1, 1.05, 1.1, 1.15, 1.2, 1.3].map(z => <MenuItem key={z} label={Math.round(z * 100) + "%"} selected={Math.abs((settings.portraitZoom || 1) - z) < 0.001} onPress={() => setSettings({ ...settings, portraitZoom: z })} />)}
+                    <Text style={styles.menuNote}>Oltre il 100% il video riempie il riquadro eliminando le righe nere, con un leggero crop ai bordi.</Text>
+                  </>
+                )}
+                {P.menu === "speed" && (<><MenuHeader title="Velocità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />)}</>)}
+                {P.menu === "quality" && (<><MenuHeader title="Qualità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{["auto", "2160", "1080", "720", "480", "360"].map(q => <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(P.info?.quality) === q} onPress={() => P.setQuality(q)} />)}<Text style={styles.menuNote}>Solo "Automatica" evita la conversione sul server: le altre attivano il transcoding e sono più lente ad avviarsi.</Text></>)}
+                {P.menu === "audio" && (<><MenuHeader title="Audio" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{(P.info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia selezionabile.</Text>}{(P.info?.audio || []).map((a: any) => <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={P.info?.audioIndex === a.Index} onPress={() => P.switchAudio(a.Index)} />)}</>)}
+                {P.menu === "subs" && (
+                  <>
+                    <MenuHeader title="Sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {P.subLoading && <Text style={styles.menuNote}>Caricamento… il video continua.</Text>}
+                    <MenuItem label="Disattivati" selected={P.subIndex == null} onPress={() => P.selectSub(null)} />
+                    {(P.info?.subs || []).map((s: any) => <MenuItem key={s.Index} label={(s.DisplayTitle || s.Language || "Sub " + s.Index) + (isTextSub(s) ? "" : "  · grafico")} selected={P.subIndex === s.Index} disabled={!isTextSub(s)} onPress={() => P.selectSub(s)} />)}
+                    {(P.info?.subs || []).length === 0 && <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text>}
+                    <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
+                  </>
+                )}
+              </ScrollView>
+            </Pressable>
           </Pressable>
-        </Pressable>
-      </Modal>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -1232,6 +1299,7 @@ function SettingsScreen() {
           <Text style={styles.sectionTitle}>Riproduzione</Text>
           <Choice label="Modalità streaming" value={settings.streamMode} options={[["auto", "Auto"], ["direct", "Direct Play"], ["transcode", "Transcoding"]]} onChange={(v: string) => setSettings({ ...settings, streamMode: v })} />
           <Choice label="Qualità massima" value={settings.quality} options={[["auto", "Auto"], ["2160", "4K"], ["1080", "1080p"], ["720", "720p"], ["480", "480p"]]} onChange={(v: string) => setSettings({ ...settings, quality: v })} />
+          <Toggle label="Avvio rapido (buffer minimo)" value={settings.fastStart} onToggle={() => setSettings({ ...settings, fastStart: !settings.fastStart })} />
           <Toggle label="Risparmio dati" value={settings.saveData} onToggle={() => setSettings({ ...settings, saveData: !settings.saveData })} />
           <Toggle label="Prossimo episodio automatico" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
           <Toggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
@@ -1240,20 +1308,26 @@ function SettingsScreen() {
           <Choice label="Velocità" value={settings.speed} options={[[0.5, "0.5×"], [0.75, "0.75×"], [1, "1×"], [1.25, "1.25×"], [1.5, "1.5×"], [2, "2×"]]} onChange={(v: number) => setSettings({ ...settings, speed: v })} />
         </View>
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
-          <Text style={styles.sectionTitle}>Audio e sottotitoli</Text>
+          <Text style={styles.sectionTitle}>Sottotitoli</Text>
+          <Choice label="Lingua" value={settings.subLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
+          <Toggle label="Automatici" value={settings.autoSub} onToggle={() => setSettings({ ...settings, autoSub: !settings.autoSub })} />
+          <Toggle label="Sfondo" value={settings.subBg} onToggle={() => setSettings({ ...settings, subBg: !settings.subBg })} />
+          <Toggle label="Bordo / ombra" value={settings.subOutline} onToggle={() => setSettings({ ...settings, subOutline: !settings.subOutline })} />
+          <Toggle label="Grassetto" value={settings.subBold} onToggle={() => setSettings({ ...settings, subBold: !settings.subBold })} />
+          <Choice label="Dimensione" value={settings.subSize} options={[[14, "14"], [16, "16"], [18, "18"], [20, "20"], [24, "24"], [28, "28"], [32, "32"]]} onChange={(v: number) => setSettings({ ...settings, subSize: v })} />
+          <Choice label="Colore" value={settings.subColor} options={[["#ffffff", "Bianco"], ["#ffe600", "Giallo"], ["#7CFC00", "Verde"], ["#00e5ff", "Ciano"]]} onChange={(v: string) => setSettings({ ...settings, subColor: v })} />
           <Choice label="Lingua audio" value={settings.audioLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, audioLang: v })} />
-          <Choice label="Lingua sottotitoli" value={settings.subLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
-          <Toggle label="Sottotitoli automatici" value={settings.autoSub} onToggle={() => setSettings({ ...settings, autoSub: !settings.autoSub })} />
-          <Choice label="Dimensione sottotitoli" value={settings.subSize} options={[[14, "14"], [16, "16"], [18, "18"], [20, "20"], [24, "24"], [28, "28"]]} onChange={(v: number) => setSettings({ ...settings, subSize: v })} />
-          <Toggle label="Statistiche riproduzione" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
         </View>
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Interfaccia</Text>
           <Text style={styles.settingLabel}>Dimensione locandine: {settings.posterSize}px</Text>
           <Slider minimumValue={120} maximumValue={220} step={5} value={settings.posterSize} minimumTrackTintColor={C.red} maximumTrackTintColor={C.surface3} thumbTintColor={C.red} onValueChange={v => setSettings({ ...settings, posterSize: v })} />
+          <Choice label="Zoom video in verticale" value={settings.portraitZoom} options={[[1, "100%"], [1.05, "105%"], [1.1, "110%"], [1.15, "115%"], [1.2, "120%"], [1.3, "130%"]]} onChange={(v: number) => setSettings({ ...settings, portraitZoom: v })} />
+          <Toggle label="Tasto rotazione in basso" value={settings.rotateBottom} onToggle={() => setSettings({ ...settings, rotateBottom: !settings.rotateBottom })} />
           <Toggle label="Locandine orizzontali (Continua / Prossimi)" value={settings.thumbWide} onToggle={() => setSettings({ ...settings, thumbWide: !settings.thumbWide })} />
           <Toggle label="Animazioni" value={settings.animations} onToggle={() => setSettings({ ...settings, animations: !settings.animations })} />
           <Toggle label="Barre di progresso" value={settings.progressBars} onToggle={() => setSettings({ ...settings, progressBars: !settings.progressBars })} />
+          <Toggle label="Statistiche riproduzione" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
         </View>
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Server</Text>
@@ -1473,7 +1547,6 @@ const styles = StyleSheet.create({
   infoTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginBottom: 4 },
   infoSub: { color: C.muted, fontSize: 13, marginBottom: 10 },
   infoDesc: { color: "#d6d6de", fontSize: 14, lineHeight: 21, marginBottom: 12 },
-  subLoading: { color: C.amber, fontSize: 11, fontWeight: "700" },
   statsInline: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 14 },
   vTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 70 },
   vBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 110 },
@@ -1482,7 +1555,7 @@ const styles = StyleSheet.create({
   vControls: { flexDirection: "row", alignItems: "center", gap: 0 },
   vError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.94)", alignItems: "center", justifyContent: "center", padding: 16, gap: 10, zIndex: 40 },
   subBox: { position: "absolute", left: 12, right: 12, alignItems: "center", zIndex: 15 },
-  subText: { color: "#fff", fontWeight: "600", textAlign: "center", textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4, backgroundColor: "rgba(0,0,0,0.5)", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5, overflow: "hidden" },
+  subText: { textAlign: "center", borderRadius: 5, overflow: "hidden" },
   centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -30, marginTop: -30, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 30 },
   centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -36, marginTop: -36, width: 72, height: 72, alignItems: "center", justifyContent: "center", zIndex: 25 },
   centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
