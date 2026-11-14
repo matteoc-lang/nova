@@ -52,11 +52,6 @@ jobs:
           npx expo install --fix
           npm install --no-audit --no-fund
 
-      - name: Print resolved versions
-        working-directory: nova
-        run: |
-          npm ls expo expo-font expo-modules-core expo-av @expo/vector-icons || true
-
       - name: Generate Android project
         working-directory: nova
         run: npx expo prebuild --platform android --clean
@@ -64,16 +59,23 @@ jobs:
       - name: Point Gradle to Android SDK
         run: echo "sdk.dir=$ANDROID_HOME" > nova/android/local.properties
 
-      - name: Build debug APK
+      - name: Give Gradle more memory
+        run: |
+          echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g" >> nova/android/gradle.properties
+
+      - name: Build RELEASE APK (JS bundle embedded)
         working-directory: nova/android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: List built APKs
+        run: ls -la nova/android/app/build/outputs/apk/release/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: nova-apk
-          path: nova/android/app/build/outputs/apk/debug/app-debug.apk
+          path: nova/android/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
           if-no-files-found: error
