@@ -1,11 +1,12 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, FlatList, Image, ImageBackground, Modal, Pressable,
-  ScrollView, StatusBar, StyleSheet, Text, TextInput, View, useWindowDimensions
+  ActivityIndicator, Alert, AppState, FlatList, Image, ImageBackground, Modal,
+  PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput,
+  View, useWindowDimensions
 } from "react-native";
 import { useEventListener } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
-import { NavigationContainer, DefaultTheme } from "@react-navigation/native";
+import { NavigationContainer, DefaultTheme, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
@@ -22,14 +23,18 @@ const C = {
 };
 
 const Stack = createNativeStackNavigator();
+const navigationRef = createNavigationContainerRef<any>();
 const AppCtx = createContext<any>(null);
+const PlayerCtx = createContext<any>(null);
 const useApp = () => useContext(AppCtx);
+const usePlayer = () => useContext(PlayerCtx);
 const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: C.bg, card: C.bg, text: C.text, primary: C.red, border: C.line } };
 
 const defaultSettings = {
-  streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: false,
+  streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: true,
   autoplay: true, loop: false, speed: 1, posterSize: 150, thumbWide: true,
-  animations: true, progressBars: true, stats: false, saveData: false, subSize: 18
+  animations: true, progressBars: true, stats: false, saveData: false, subSize: 16,
+  background: true, pip: true
 };
 
 function fmt(sec: number) {
@@ -47,7 +52,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="2.0.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.0.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -167,8 +172,6 @@ async function loadSeasons(session: any, item: any) {
     .map((s: any) => ({ ...s, episodes: s.episodes.sort((a: any, b: any) => a.episode - b.episode) }));
 }
 
-/* ---------- SOTTOTITOLI: scaricati come testo, disegnati sopra il video ---------- */
-
 function isTextSub(s: any) {
   if (s?.IsTextSubtitleStream === true) return true;
   if (s?.IsTextSubtitleStream === false) return false;
@@ -177,16 +180,20 @@ function isTextSub(s: any) {
 
 async function fetchSubtitleText(session: any, itemId: string, mediaSourceId: string, index: number) {
   const base = session.server + "/Videos/" + itemId + "/" + mediaSourceId + "/Subtitles/" + index + "/Stream";
+  let lastErr = "nessuna risposta";
   for (const ext of [".vtt", ".srt"]) {
     try {
-      const r = await fetch(base + ext + "?api_key=" + session.token);
+      const r = await fetchWithTimeout(base + ext + "?api_key=" + session.token, {}, 25000);
       if (r.ok) {
         const t = await r.text();
         if (t && t.trim()) return t;
-      }
-    } catch {}
+        lastErr = "file vuoto";
+      } else lastErr = "HTTP " + r.status;
+    } catch (e: any) {
+      lastErr = e.name === "AbortError" ? "timeout (il server sta estraendo i sottotitoli)" : (e.message || "errore rete");
+    }
   }
-  throw new Error("Il server non ha restituito il testo dei sottotitoli.");
+  throw new Error(lastErr);
 }
 
 function parseTimestamp(s: string) {
@@ -197,8 +204,7 @@ function parseTimestamp(s: string) {
 }
 
 function cleanSubText(lines: string[]) {
-  return lines
-    .join("\n")
+  return lines.join("\n")
     .replace(/<[^>]+>/g, "")
     .replace(/\{\\[^}]*\}/g, "")
     .replace(/\{[^}]*\}/g, "")
@@ -214,8 +220,7 @@ function parseSubtitles(raw: string) {
   for (const block of blocks) {
     const lines = block.split("\n").filter(l => l.trim() !== "");
     if (!lines.length) continue;
-    if (/^WEBVTT/i.test(lines[0])) continue;
-    if (/^(NOTE|STYLE|REGION)/i.test(lines[0])) continue;
+    if (/^(WEBVTT|NOTE|STYLE|REGION)/i.test(lines[0])) continue;
     let i = 0;
     if (!lines[i].includes("-->")) i = 1;
     if (i >= lines.length || !lines[i].includes("-->")) continue;
@@ -231,7 +236,16 @@ function parseSubtitles(raw: string) {
   return cues;
 }
 
-/* ---------- STREAM: nessun parametro manipolato a mano ---------- */
+function activeCueText(cues: any[], t: number) {
+  if (!cues.length) return "";
+  const out: string[] = [];
+  for (let i = 0; i < cues.length; i++) {
+    const c = cues[i];
+    if (c.start > t + 0.05) break;
+    if (t >= c.start && t <= c.end && out.indexOf(c.text) < 0) out.push(c.text);
+  }
+  return out.join("\n");
+}
 
 function nativeProfile(force: boolean, bitrate: number) {
   return {
@@ -252,7 +266,6 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
       reason: "Demo MP4/H.264", startOffset: 0
     };
   }
-
   const quality = opts.quality || settings.quality || "auto";
   const rates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
   let bitrate = rates[quality] || 40000000;
@@ -264,13 +277,9 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
 
   const body: any = {
     DeviceProfile: nativeProfile(force, bitrate),
-    AutoOpenLiveStream: true,
-    MaxStreamingBitrate: bitrate,
-    EnableDirectPlay: !force,
-    EnableDirectStream: !force,
-    EnableTranscoding: true,
-    AllowVideoStreamCopy: !force,
-    AllowAudioStreamCopy: !force
+    AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate,
+    EnableDirectPlay: !force, EnableDirectStream: !force, EnableTranscoding: true,
+    AllowVideoStreamCopy: !force, AllowAudioStreamCopy: !force
   };
   if (explicitAudio != null) body.AudioStreamIndex = explicitAudio;
   if (startSeconds > 0) body.StartTimeTicks = Math.round(startSeconds * 1e7);
@@ -307,10 +316,8 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
 
   const hls = /\.m3u8/i.test(url);
   return {
-    id: itemId, url, method, hls, quality,
-    duration: (ms.RunTimeTicks || 0) / 1e7,
-    audio, subs, audioIndex: ai,
-    mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
+    id: itemId, url, method, hls, quality, duration: (ms.RunTimeTicks || 0) / 1e7,
+    audio, subs, audioIndex: ai, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
     reason: force ? "Transcoding richiesto" : "Direct Play nativo",
     startOffset: hls && startSeconds > 0 ? startSeconds : 0
   };
@@ -402,9 +409,9 @@ function pickFeatured(items: any[], progress: any, epMap: any, list: string[]) {
   return pool[Math.floor(Math.random() * pool.length)].it;
 }
 
-function IconButton({ name, onPress, size = 22, style }: any) {
+function IconButton({ name, onPress, size = 22, style, active }: any) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed, style]}>
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.iconButton, (pressed || active) && styles.pressed, style]}>
       <Ionicons name={name} size={size} color={C.text} />
     </Pressable>
   );
@@ -463,6 +470,670 @@ function Row({ title, data, renderItem, keyExtractor }: any) {
   );
 }
 
+function MenuItem({ label, value, selected, disabled, onPress }: any) {
+  return (
+    <Pressable onPress={disabled ? undefined : onPress} style={[styles.menuItem, disabled && { opacity: 0.45 }]}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
+    </Pressable>
+  );
+}
+
+function MenuToggle({ label, value, onToggle }: any) {
+  return (
+    <Pressable onPress={onToggle} style={styles.menuItem}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
+    </Pressable>
+  );
+}
+
+function MenuHeader({ title, onBack, onClose }: any) {
+  return (
+    <View style={styles.menuHeader}>
+      <IconButton name="chevron-back" size={20} onPress={onBack} />
+      <Text style={styles.menuHeaderText}>{title}</Text>
+      <View style={{ flex: 1 }} />
+      <IconButton name="close" size={20} onPress={onClose} />
+    </View>
+  );
+}
+
+/* ================= PLAYER PROVIDER (vive sopra la navigazione) ================= */
+
+function PlayerProvider({ children }: any) {
+  const { session, settings, saveProgress, epMap, progress } = useApp();
+  const player = useVideoPlayer(null, p => { p.loop = false; });
+
+  const [mode, setMode] = useState<"closed" | "full" | "mini">("closed");
+  const [item, setItem] = useState<any>(null);
+  const [episode, setEpisode] = useState<any>(null);
+  const [info, setInfo] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [error, setError] = useState("");
+  const [playing, setPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [scrubbing, setScrubbing] = useState(false);
+  const [scrub, setScrub] = useState(0);
+  const [cues, setCues] = useState<any[]>([]);
+  const [subIndex, setSubIndex] = useState<number | null>(null);
+  const [subLoading, setSubLoading] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [ended, setEnded] = useState(false);
+  const [nextEp, setNextEp] = useState<any>(null);
+  const [videoSize, setVideoSize] = useState({ w: 16, h: 9 });
+  const [landscape, setLandscape] = useState(false);
+  const [controls, setControls] = useState(true);
+  const [menu, setMenu] = useState<string | null>(null);
+  const [dragY, setDragY] = useState(0);
+
+  const baseOffset = useRef(0);
+  const pendingSeek = useRef<number | null>(null);
+  const seekLock = useRef(0);
+  const scrubbingRef = useRef(false);
+  const finishedRef = useRef(false);
+  const retried = useRef(false);
+  const lastSave = useRef(0);
+  const positionRef = useRef(0);
+  const infoRef = useRef<any>(null);
+  const optsRef = useRef<any>({});
+  const itemRef = useRef<any>(null);
+  const episodeRef = useRef<any>(null);
+  const subIndexRef = useRef<number | null>(null);
+  const subLangRef = useRef("");
+  const noticeTimer = useRef<any>(null);
+  const playingRef = useRef(false);
+  const modeRef = useRef<any>("closed");
+  const settingsRef = useRef(settings);
+
+  useEffect(() => { infoRef.current = info; }, [info]);
+  useEffect(() => { itemRef.current = item; }, [item]);
+  useEffect(() => { episodeRef.current = episode; }, [episode]);
+  useEffect(() => { positionRef.current = position; }, [position]);
+  useEffect(() => { subIndexRef.current = subIndex; }, [subIndex]);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+
+  useEffect(() => {
+    try { (player as any).timeUpdateEventInterval = 0.2; } catch {}
+    try { player.staysActiveInBackground = true; } catch {}
+    try { (player as any).showNowPlayingNotification = true; } catch {}
+  }, [player]);
+
+  useEffect(() => {
+    try { player.playbackRate = settings.speed; } catch {}
+    try { player.loop = settings.loop; } catch {}
+    try { player.staysActiveInBackground = !!settings.background; } catch {}
+  }, [settings.speed, settings.loop, settings.background, player]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", state => {
+      if (state !== "active" && playingRef.current && settingsRef.current.pip) {
+        try { (player as any).startPictureInPicture?.(); } catch {}
+      }
+    });
+    return () => sub.remove();
+  }, [player]);
+
+  useEffect(() => () => {
+    ScreenOrientation.unlockAsync().catch(() => {});
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+  }, []);
+
+  function flash(msg: string) {
+    setNotice(msg);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(""), 3000);
+  }
+
+  async function loadSubTrack(stream: any, silent = false) {
+    const inf = infoRef.current;
+    if (!inf || !stream) return;
+    if (session.mode === "demo") { if (!silent) flash("Nessun sottotitolo nella demo."); return; }
+    if (!isTextSub(stream)) { if (!silent) flash("Sottotitoli grafici (PGS): non supportati senza transcoding."); return; }
+    setSubLoading(true);
+    if (!silent) flash("Carico i sottotitoli… la riproduzione continua.");
+    try {
+      const raw = await fetchSubtitleText(session, inf.id, inf.mediaSourceId, stream.Index);
+      const parsed = parseSubtitles(raw);
+      if (!parsed.length) throw new Error("nessuna battuta leggibile");
+      setCues(parsed);
+      setSubIndex(stream.Index);
+      subIndexRef.current = stream.Index;
+      subLangRef.current = String(stream.Language || "");
+      if (!silent) flash("Sottotitoli: " + (stream.DisplayTitle || stream.Language || "attivi"));
+    } catch (e: any) {
+      setCues([]); setSubIndex(null); subIndexRef.current = null;
+      if (!silent) flash("Sottotitoli: " + (e.message || "errore"));
+    } finally {
+      setSubLoading(false);
+    }
+  }
+
+  async function load(opts: any = {}, itArg = itemRef.current, epArg = episodeRef.current, startAt = 0) {
+    if (!itArg || !session) return;
+    setLoading(true); setError(""); setEnded(false);
+    optsRef.current = { ...optsRef.current, ...opts };
+    seekLock.current = Date.now() + 1200;
+    try {
+      const inf = await getPlayback(session, epArg ? epArg.id : itArg.id, settingsRef.current, {
+        ...optsRef.current, startSeconds: startAt,
+        demoUrl: epArg?.video || itArg.video, duration: epArg?.duration || itArg.duration
+      });
+      infoRef.current = inf;
+      setInfo(inf);
+      setDuration(inf.duration || epArg?.duration || itArg.duration || 0);
+      baseOffset.current = inf.startOffset || 0;
+      pendingSeek.current = inf.hls ? null : startAt;
+      setPosition(startAt); positionRef.current = startAt;
+      player.replace({ uri: inf.url });
+
+      const s = settingsRef.current;
+      if (subIndexRef.current != null) {
+        const match = (inf.subs || []).find((x: any) => x.Index === subIndexRef.current)
+          || (inf.subs || []).find((x: any) => String(x.Language || "") === subLangRef.current && isTextSub(x));
+        if (match) loadSubTrack(match, true);
+        else { setCues([]); setSubIndex(null); subIndexRef.current = null; }
+      } else if (s.autoSub) {
+        const pref = (inf.subs || []).find((x: any) => String(x.Language || "").toLowerCase().startsWith(s.subLang) && isTextSub(x));
+        if (pref) loadSubTrack(pref, true);
+      }
+    } catch (e: any) {
+      setError(e.message || "Errore di riproduzione.");
+      setLoading(false);
+    }
+  }
+
+  async function open(it: any, ep: any = null, startAt?: number) {
+    if (!it) return;
+    let e = ep;
+    if (it.type === "series" && !e) {
+      try { const ss = await loadSeasons(session, it); e = targetEpisode(ss, progress); } catch {}
+    }
+    setItem(it); itemRef.current = it;
+    setEpisode(e); episodeRef.current = e;
+    setMode("full"); modeRef.current = "full";
+    setStarted(false); setControls(true); setCues([]); setSubIndex(null);
+    subIndexRef.current = null; subLangRef.current = "";
+    finishedRef.current = false; retried.current = false; optsRef.current = {};
+    const id = e ? e.id : it.id;
+    const start = startAt != null ? startAt : (isWatched(progress[id]) ? 0 : (progress[id]?.position || 0));
+    await load({}, it, e, start);
+  }
+
+  function minimize() {
+    setMode("mini"); modeRef.current = "mini";
+    setMenu(null); setDragY(0);
+    ScreenOrientation.unlockAsync().catch(() => {});
+    setLandscape(false);
+  }
+
+  function expand() {
+    setMode("full"); modeRef.current = "full";
+    setControls(true);
+  }
+
+  function close() {
+    try { player.pause(); } catch {}
+    if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true);
+    setMode("closed"); modeRef.current = "closed";
+    setMenu(null); setEnded(false); setCues([]); setSubIndex(null);
+    subIndexRef.current = null;
+    ScreenOrientation.unlockAsync().catch(() => {});
+    setLandscape(false);
+  }
+
+  useEventListener(player, "statusChange", ({ status, error: err }: any) => {
+    if (status === "readyToPlay") {
+      setBuffering(false); setLoading(false); setStarted(true);
+      try {
+        const vt = player.videoTrack;
+        if (vt?.width && vt?.height) setVideoSize({ w: vt.width, h: vt.height });
+      } catch {}
+      if (pendingSeek.current != null) {
+        const t = pendingSeek.current; pendingSeek.current = null;
+        try { player.currentTime = t; } catch {}
+      }
+      try { player.play(); } catch {}
+    } else if (status === "loading") {
+      setBuffering(true);
+    } else if (status === "error") {
+      setBuffering(false);
+      if (!retried.current && infoRef.current?.method === "DirectPlay") {
+        retried.current = true;
+        flash("Formato non supportato: passo al transcoding…");
+        load({ force: true }, itemRef.current, episodeRef.current, positionRef.current);
+      } else {
+        setError(err?.message || "Il dispositivo non riesce a decodificare questo stream.");
+        setLoading(false);
+      }
+    }
+  });
+
+  useEventListener(player, "videoTrackChange", ({ videoTrack }: any) => {
+    if (videoTrack?.width && videoTrack?.height) setVideoSize({ w: videoTrack.width, h: videoTrack.height });
+  });
+
+  useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
+    if (scrubbingRef.current || Date.now() < seekLock.current) return;
+    const pos = baseOffset.current + (currentTime || 0);
+    positionRef.current = pos;
+    setPosition(pos);
+    const dur = infoRef.current?.duration || player.duration || 0;
+    if (dur > 0) setDuration(dur);
+    const it = itemRef.current;
+    if (!it) return;
+    const id = episodeRef.current ? episodeRef.current.id : it.id;
+    if (Date.now() - lastSave.current > 5000 && dur > 0) {
+      lastSave.current = Date.now();
+      saveProgress(id, pos, dur);
+    }
+    if (dur > 0 && pos >= dur - 1 && !finishedRef.current) {
+      finishedRef.current = true;
+      handleEnd();
+    }
+  });
+
+  useEventListener(player, "playingChange", ({ isPlaying }: any) => setPlaying(!!isPlaying));
+
+  useEffect(() => {
+    if (!info) return;
+    reportPlayback(session, "start", info, positionRef.current, false);
+    const t = setInterval(() => reportPlayback(session, "progress", info, positionRef.current, !playingRef.current), 10000);
+    return () => clearInterval(t);
+  }, [info?.url]);
+
+  useEffect(() => {
+    if (mode !== "full" || !landscape || !controls || !playing || menu || loading) return;
+    const t = setTimeout(() => setControls(false), 4000);
+    return () => clearTimeout(t);
+  }, [mode, landscape, controls, playing, menu, loading]);
+
+  useEffect(() => {
+    if (!ended || !nextEp || !settings.autoplay) return;
+    const t = setTimeout(() => playEpisode(nextEp), 8000);
+    return () => clearTimeout(t);
+  }, [ended, nextEp, settings.autoplay]);
+
+  async function handleEnd() {
+    const it = itemRef.current;
+    if (!it) return;
+    const id = episodeRef.current ? episodeRef.current.id : it.id;
+    const dur = infoRef.current?.duration || duration;
+    saveProgress(id, dur, dur);
+    let nx = null;
+    if (it.type === "series" && episodeRef.current) {
+      try { const ss = await loadSeasons(session, it); nx = findNextEpisode(ss, episodeRef.current); } catch {}
+    }
+    setNextEp(nx); setEnded(true);
+  }
+
+  function beginScrub() {
+    scrubbingRef.current = true;
+    setScrubbing(true);
+    setScrub(positionRef.current);
+  }
+
+  function endScrub(target: number) {
+    const dur = infoRef.current?.duration || duration || 0;
+    const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
+    scrubbingRef.current = false;
+    setScrubbing(false);
+    seekLock.current = Date.now() + 1200;
+    setPosition(T); positionRef.current = T;
+    finishedRef.current = false; setEnded(false);
+    if (infoRef.current?.hls) load(optsRef.current, itemRef.current, episodeRef.current, T);
+    else { try { player.currentTime = T; } catch {} }
+  }
+
+  function togglePlay() {
+    try { if (playing) player.pause(); else player.play(); } catch {}
+    setControls(true);
+  }
+
+  async function rotate() {
+    try {
+      if (landscape) { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); setLandscape(false); }
+      else { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT); setLandscape(true); }
+    } catch {}
+    setControls(true);
+  }
+
+  async function switchAudio(index: number) {
+    setMenu(null);
+    flash("Cambio audio…");
+    await load({ audioIndex: index, force: true }, itemRef.current, episodeRef.current, positionRef.current);
+  }
+
+  function selectSub(stream: any | null) {
+    setMenu(null);
+    if (!stream) {
+      setCues([]); setSubIndex(null); subIndexRef.current = null; subLangRef.current = "";
+      flash("Sottotitoli disattivati");
+      return;
+    }
+    loadSubTrack(stream);
+  }
+
+  function setQuality(q: string) {
+    setMenu(null);
+    flash("Qualità: " + (q === "auto" ? "auto" : q + "p"));
+    load({ quality: q, force: q !== "auto" }, itemRef.current, episodeRef.current, positionRef.current);
+  }
+
+  function playEpisode(ep: any) {
+    setEnded(false); setNextEp(null);
+    setEpisode(ep); episodeRef.current = ep;
+    finishedRef.current = false; retried.current = false; optsRef.current = {};
+    setCues([]);
+    load({}, itemRef.current, ep, 0);
+  }
+
+  const value = {
+    player, mode, item, episode, info, loading, buffering, started, error, playing,
+    position, duration, scrubbing, scrub, cues, subIndex, subLoading, notice, ended,
+    nextEp, videoSize, landscape, controls, menu, dragY,
+    setControls, setMenu, setDragY, setScrub,
+    open, close, minimize, expand, togglePlay, beginScrub, endScrub, rotate,
+    switchAudio, selectSub, setQuality, playEpisode, flash
+  };
+
+  return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
+}
+
+/* ================= OVERLAY PLAYER ================= */
+
+function PlayerOverlay() {
+  const P = usePlayer();
+  const { settings, setSettings, items, list, toggleList } = useApp();
+  const dim = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const isLandscape = P.landscape || dim.width > dim.height;
+
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onMoveShouldSetPanResponder: (_, g) => !isLandscape && g.dy > 14 && Math.abs(g.dy) > Math.abs(g.dx) * 1.4,
+    onPanResponderMove: (_, g) => P.setDragY(Math.max(0, g.dy)),
+    onPanResponderRelease: (_, g) => { if (g.dy > 90) P.minimize(); else P.setDragY(0); },
+    onPanResponderTerminate: () => P.setDragY(0)
+  })).current;
+
+  if (P.mode !== "full" || !P.item) return null;
+
+  const aspect = P.videoSize.w && P.videoSize.h ? P.videoSize.w / P.videoSize.h : 16 / 9;
+  let vw: number, vh: number;
+  if (isLandscape) {
+    vw = dim.width; vh = dim.width / aspect;
+    if (vh > dim.height) { vh = dim.height; vw = dim.height * aspect; }
+  } else {
+    vw = dim.width; vh = Math.min(dim.width / aspect, dim.height * 0.42);
+  }
+
+  const subText = activeCueText(P.cues, P.position);
+  const showControls = isLandscape ? P.controls : true;
+  const bigSpinner = (P.loading || P.buffering) && !P.started;
+  const title = P.episode ? P.episode.title : P.item.title;
+  const seriesLine = P.episode ? `${P.item.title} · S${P.episode.season}:E${P.episode.episode}` : `${P.item.year} · ${P.item.genres.join(", ")}`;
+  const menuW = Math.min(400, dim.width - 32);
+  const menuH = Math.min(dim.height * 0.8, 560);
+  const inList = list.includes(P.item.id);
+  const activeAudio = P.info?.audio?.find((a: any) => a.Index === P.info.audioIndex);
+  const activeSub = (P.info?.subs || []).find((s: any) => s.Index === P.subIndex);
+  const similar = items.filter((x: any) => x.id !== P.item.id && x.genres.some((g: string) => P.item.genres.includes(g))).slice(0, 6);
+
+  const videoBlock = (
+    <View
+      style={[styles.videoBox, { width: vw, height: vh, transform: [{ translateY: isLandscape ? 0 : P.dragY }] }]}
+      {...(!isLandscape ? pan.panHandlers : {})}
+    >
+      <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} allowsPictureInPicture />
+      <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
+
+      {!!subText && (
+        <View style={[styles.subBox, { bottom: showControls && isLandscape ? 78 : 14 }]} pointerEvents="none">
+          <Text style={[styles.subText, { fontSize: settings.subSize, lineHeight: settings.subSize * 1.3 }]}>{subText}</Text>
+        </View>
+      )}
+
+      {bigSpinner && (
+        <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>
+      )}
+
+      {showControls && !bigSpinner && !P.ended && !P.error && (
+        <Pressable onPress={P.togglePlay} style={styles.centerPlay} hitSlop={26}>
+          <Ionicons name={P.playing ? "pause" : "play"} size={isLandscape ? 60 : 46} color="#fff" style={styles.centerIcon} />
+        </Pressable>
+      )}
+
+      {showControls && !P.error && (
+        <>
+          <LinearGradient colors={["rgba(0,0,0,0.7)", "transparent"]} style={styles.vTopScrim} pointerEvents="none" />
+          <View style={styles.vTop}>
+            <IconButton name="chevron-down" size={26} onPress={P.minimize} />
+            <View style={{ flex: 1 }} />
+            {P.buffering && P.started && <ActivityIndicator color={C.red} size="small" style={{ marginRight: 8 }} />}
+            <IconButton name="sync-outline" size={22} onPress={P.rotate} />
+          </View>
+
+          <LinearGradient colors={["transparent", "rgba(0,0,0,0.8)"]} style={styles.vBottomScrim} pointerEvents="none" />
+          <View style={styles.vBottom}>
+            <Slider style={{ width: "100%", height: 28 }} minimumValue={0} maximumValue={Math.max(1, P.duration)}
+              value={P.scrubbing ? P.scrub : P.position} minimumTrackTintColor={C.red}
+              maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
+              onSlidingStart={P.beginScrub} onValueChange={P.setScrub} onSlidingComplete={P.endScrub} />
+            <View style={styles.vControls}>
+              <Text style={styles.playerTime}>{fmt(P.scrubbing ? P.scrub : P.position)} <Text style={styles.faint}>/ {fmt(P.duration)}</Text></Text>
+              <View style={{ flex: 1 }} />
+              <IconButton name="musical-notes-outline" size={20} onPress={() => P.setMenu("audio")} />
+              <IconButton name="chatbox-ellipses-outline" size={20} active={P.subIndex != null} onPress={() => P.setMenu("subs")} />
+              <Pressable onPress={() => P.setMenu("quality")} style={styles.hdButton}>
+                <View style={styles.hdBox}><Text style={styles.hdText}>{P.info?.quality && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View>
+              </Pressable>
+              <IconButton name="settings-outline" size={20} onPress={() => P.setMenu("root")} />
+            </View>
+          </View>
+        </>
+      )}
+
+      {!!P.error && (
+        <View style={styles.vError}>
+          <Ionicons name="warning-outline" size={36} color={C.amber} />
+          <Text style={styles.emptyTitleSm}>Video non caricabile</Text>
+          <Text style={styles.mutedSm}>{P.error}</Text>
+          <View style={styles.actions}>
+            <Pressable onPress={() => P.setQuality("auto")} style={styles.primaryButtonSm}><Text style={styles.primaryButtonText}>Riprova</Text></Pressable>
+            <Pressable onPress={P.close} style={styles.secondaryButtonSm}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
+          </View>
+        </View>
+      )}
+
+      {P.ended && (
+        <View style={styles.vError}>
+          <Text style={styles.endLabel}>{P.nextEp ? "Prossimo episodio" : "Fine"}</Text>
+          {P.nextEp ? (
+            <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.nextCard}>
+              <View style={styles.nextThumb} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.episodeTitle}>S{P.nextEp.season}:E{P.nextEp.episode} · {P.nextEp.title}</Text>
+                <Text style={styles.mutedSm}>{P.item.title}</Text>
+              </View>
+            </Pressable>
+          ) : null}
+          <View style={styles.actions}>
+            {P.nextEp && <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.whiteButton}><Ionicons name="play" size={18} color="#000" /><Text style={styles.whiteButtonText}>Guarda</Text></Pressable>}
+            <Pressable onPress={() => P.endScrub(0)} style={styles.ghostButton}><Ionicons name="refresh" size={18} color="#fff" /><Text style={styles.ghostButtonText}>Riguarda</Text></Pressable>
+            <Pressable onPress={P.close} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+
+  return (
+    <View style={[styles.overlayRoot, isLandscape ? styles.overlayLand : { paddingTop: insets.top }]}>
+      <StatusBar hidden={isLandscape} barStyle="light-content" />
+      {isLandscape ? (
+        <View style={styles.landWrap}>{videoBlock}</View>
+      ) : (
+        <>
+          {videoBlock}
+          <ScrollView style={styles.infoPanel} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 30 }}>
+            <Text style={styles.infoTitle}>{title}</Text>
+            <Text style={styles.infoSub}>{seriesLine}</Text>
+            <View style={styles.metaRow}>
+              <Text style={styles.match}>{P.item.match}% compatibile</Text>
+              <Text style={styles.badge}>{P.item.rating}</Text>
+              <Text style={styles.badge}>{P.info?.method || "—"}</Text>
+              {P.subLoading && <Text style={styles.subLoading}>carico sottotitoli…</Text>}
+            </View>
+            <View style={[styles.actions, { marginVertical: 14 }]}>
+              <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, inList && styles.roundOn]}>
+                <Ionicons name={inList ? "checkmark" : "add"} size={24} color={inList ? C.green : "#fff"} />
+              </Pressable>
+              <Pressable
+                onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }}
+                style={styles.ghostButton}>
+                <Ionicons name="information-circle-outline" size={20} color="#fff" />
+                <Text style={styles.ghostButtonText}>Dettagli</Text>
+              </Pressable>
+            </View>
+            {!!P.episode?.overview && <Text style={styles.infoDesc}>{P.episode.overview}</Text>}
+            {!!P.item.overview && <Text style={styles.infoDesc}>{P.item.overview}</Text>}
+            <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{P.item.genres.join(", ") || "–"}</Text>
+            <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{(P.item.cast || []).join(", ") || "–"}</Text>
+
+            {settings.stats && P.info && (
+              <View style={styles.statsInline}>
+                <Text style={styles.statsTitle}>STATISTICHE</Text>
+                <Text style={styles.statsLine}>Metodo {P.info.method} · Qualità {P.info.quality}</Text>
+                <Text style={styles.statsLine}>Audio {activeAudio?.DisplayTitle || "default"}</Text>
+                <Text style={styles.statsLine}>Sub {activeSub?.DisplayTitle || "off"} · {P.cues.length} battute</Text>
+                <Text style={styles.statsLine}>{P.info.reason}</Text>
+              </View>
+            )}
+
+            {!!similar.length && (
+              <>
+                <Text style={styles.sectionTitle}>Altri titoli simili</Text>
+                <View style={styles.similarGrid}>
+                  {similar.map((x: any) => (
+                    <View key={x.id} style={styles.similarItem}>
+                      <MediaCard item={x} width="100%" onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: x.id }); }} />
+                    </View>
+                  ))}
+                </View>
+              </>
+            )}
+          </ScrollView>
+        </>
+      )}
+
+      {!!P.notice && <View style={[styles.notice, { top: isLandscape ? 12 : insets.top + vh + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View>}
+
+      <Modal visible={!!P.menu} transparent animationType="fade" onRequestClose={() => P.setMenu(null)}>
+        <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => P.setMenu(null)}>
+          <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
+            <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
+              {P.menu === "root" && (
+                <>
+                  <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
+                  <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
+                  <MenuItem label="Dimensione sottotitoli" value={settings.subSize + "px"} onPress={() => P.setMenu("subsize")} />
+                  <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
+                  <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
+                  <MenuToggle label="Background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
+                  <MenuToggle label="Picture-in-Picture" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
+                  <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
+                  <MenuItem label="Ruota schermo" value={P.landscape ? "Orizzontale" : "Verticale"} onPress={P.rotate} />
+                  <MenuItem label="Miniplayer" onPress={() => { P.setMenu(null); P.minimize(); }} />
+                  <MenuItem label="Chiudi video" onPress={() => { P.setMenu(null); P.close(); }} />
+                </>
+              )}
+              {P.menu === "speed" && (
+                <>
+                  <MenuHeader title="Velocità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => (
+                    <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />
+                  ))}
+                </>
+              )}
+              {P.menu === "subsize" && (
+                <>
+                  <MenuHeader title="Dimensione sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                  {[14, 16, 18, 20, 24, 28, 32].map(s => (
+                    <MenuItem key={s} label={s + " px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />
+                  ))}
+                </>
+              )}
+              {P.menu === "quality" && (
+                <>
+                  <MenuHeader title="Qualità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                  {["auto", "2160", "1080", "720", "480", "360"].map(q => (
+                    <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(P.info?.quality) === q} onPress={() => P.setQuality(q)} />
+                  ))}
+                </>
+              )}
+              {P.menu === "audio" && (
+                <>
+                  <MenuHeader title="Audio" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                  {(P.info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia selezionabile.</Text>}
+                  {(P.info?.audio || []).map((a: any) => (
+                    <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={P.info?.audioIndex === a.Index} onPress={() => P.switchAudio(a.Index)} />
+                  ))}
+                </>
+              )}
+              {P.menu === "subs" && (
+                <>
+                  <MenuHeader title="Sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                  {P.subLoading && <Text style={styles.menuNote}>Caricamento in corso… il video continua a suonare.</Text>}
+                  <MenuItem label="Disattivati" selected={P.subIndex == null} onPress={() => P.selectSub(null)} />
+                  {(P.info?.subs || []).map((s: any) => (
+                    <MenuItem key={s.Index}
+                      label={(s.DisplayTitle || s.Language || "Sub " + s.Index) + (isTextSub(s) ? "" : "  · grafico")}
+                      selected={P.subIndex === s.Index} disabled={!isTextSub(s)} onPress={() => P.selectSub(s)} />
+                  ))}
+                  {(P.info?.subs || []).length === 0 && <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text>}
+                </>
+              )}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+function MiniPlayer() {
+  const P = usePlayer();
+  const insets = useSafeAreaInsets();
+  if (P.mode !== "mini" || !P.item) return null;
+  const title = P.episode ? P.episode.title : P.item.title;
+  const sub = P.episode ? `${P.item.title} · S${P.episode.season}:E${P.episode.episode}` : P.item.title;
+  const pct = P.duration > 0 ? Math.min(100, (P.position / P.duration) * 100) : 0;
+  return (
+    <View style={[styles.mini, { bottom: insets.bottom + 8 }]}>
+      <Pressable style={styles.miniRow} onPress={P.expand}>
+        <View style={styles.miniVideo}>
+          <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="cover" nativeControls={false} allowsPictureInPicture />
+        </View>
+        <View style={{ flex: 1, paddingRight: 6 }}>
+          <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
+          <Text numberOfLines={1} style={styles.miniSub}>{sub}</Text>
+        </View>
+        <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
+        <IconButton name="close" size={22} onPress={P.close} />
+      </Pressable>
+      <View style={styles.miniProgress}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>
+    </View>
+  );
+}
+
+/* ================= SCREENS ================= */
+
 function LoginScreen() {
   const { setSession, resetLocal } = useApp();
   const [server, setServer] = useState("");
@@ -503,17 +1174,13 @@ function LoginScreen() {
         <View style={styles.loginCard}>
           <Text style={styles.loginCardTitle}>Accedi</Text>
           <Text style={styles.loginCardSub}>Connettiti al tuo server Jellyfin.</Text>
-
           <Text style={styles.label}>Server</Text>
           <TextInput value={server} onChangeText={setServer} placeholder="http://192.168.1.10:8096"
             placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
-
           <Pressable onPress={doTest} style={styles.testButton}><Text style={styles.testButtonText}>Test connessione</Text></Pressable>
           {!!status && <Text style={[styles.status, status.startsWith("✓") ? styles.ok : styles.bad]}>{status}</Text>}
-
           <Text style={styles.label}>Utente</Text>
           <TextInput value={user} onChangeText={setUser} autoCapitalize="none" autoCorrect={false} style={styles.input} />
-
           <Text style={styles.label}>Password</Text>
           <View style={styles.passWrap}>
             <TextInput value={pass} onChangeText={setPass} secureTextEntry={!showPass}
@@ -523,15 +1190,11 @@ function LoginScreen() {
               <Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} />
             </Pressable>
           </View>
-
           {!!err && <Text style={styles.bad}>{err}</Text>}
-
           <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}>
             <Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text>
           </Pressable>
-
           <View style={styles.divider}><View style={styles.dividerLine} /><Text style={styles.dividerText}>oppure</Text><View style={styles.dividerLine} /></View>
-
           <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={styles.secondaryButton}>
             <Text style={styles.secondaryButtonText}>Esplora la demo</Text>
           </Pressable>
@@ -542,53 +1205,20 @@ function LoginScreen() {
   );
 }
 
-function MenuItem({ label, value, selected, disabled, onPress }: any) {
-  return (
-    <Pressable onPress={disabled ? undefined : onPress} style={[styles.menuItem, disabled && { opacity: 0.45 }]}>
-      <Text style={styles.menuItemText}>{label}</Text>
-      <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
-    </Pressable>
-  );
-}
-
-function MenuToggle({ label, value, onToggle }: any) {
-  return (
-    <Pressable onPress={onToggle} style={styles.menuItem}>
-      <Text style={styles.menuItemText}>{label}</Text>
-      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
-    </Pressable>
-  );
-}
-
-function MenuHeader({ title, onBack, onClose }: any) {
-  return (
-    <View style={styles.menuHeader}>
-      <IconButton name="chevron-back" size={20} onPress={onBack} />
-      <Text style={styles.menuHeaderText}>{title}</Text>
-      <View style={{ flex: 1 }} />
-      <IconButton name="close" size={20} onPress={onClose} />
-    </View>
-  );
-}
-
-function TopBar({ navigation }: any) {
+function TopBar() {
   const { session, setSession, reloadLibrary, resetLocal } = useApp();
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
-
   return (
     <>
       <View style={[styles.topBar, { paddingTop: insets.top, height: 62 + insets.top }]}>
         <Text style={styles.topLogo}>NOVA</Text>
         <View style={{ flex: 1 }} />
-        <IconButton name="search" onPress={() => navigation.navigate("Search")} />
-        <IconButton name="settings-outline" onPress={() => navigation.navigate("Settings")} />
-        <Pressable onPress={() => setOpen(true)} style={({ pressed }) => pressed && { opacity: 0.75 }}>
-          <Face size={34} />
-        </Pressable>
+        <IconButton name="search" onPress={() => navigationRef.navigate("Search")} />
+        <IconButton name="settings-outline" onPress={() => navigationRef.navigate("Settings")} />
+        <Pressable onPress={() => setOpen(true)} style={({ pressed }) => pressed && { opacity: 0.75 }}><Face size={34} /></Pressable>
       </View>
-
       <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
         <Pressable style={styles.modalBackdrop} onPress={close}>
           <Pressable style={styles.profileMenu} onPress={() => {}}>
@@ -599,7 +1229,7 @@ function TopBar({ navigation }: any) {
                 <Text style={styles.muted} numberOfLines={1}>{session?.mode === "demo" ? "Modalità demo" : session?.server}</Text>
               </View>
             </View>
-            <MenuItem label="Impostazioni" onPress={() => { close(); navigation.navigate("Settings"); }} />
+            <MenuItem label="Impostazioni" onPress={() => { close(); navigationRef.navigate("Settings"); }} />
             <MenuItem label="Ricarica libreria" onPress={() => { close(); reloadLibrary(); }} />
             <MenuItem label="Esci" onPress={() => { close(); setSession(null); }} />
             <MenuItem label="Ripara dati locali" onPress={() => { close(); resetLocal(); }} />
@@ -610,8 +1240,9 @@ function TopBar({ navigation }: any) {
   );
 }
 
-function HomeScreen({ navigation }: any) {
+function HomeScreen() {
   const { items, epMap, progress, nextUp, list, libLoading, settings, featured, reshuffle } = useApp();
+  const P = usePlayer();
   const wide = settings.thumbWide;
   const cardW = settings.posterSize;
   const wideW = Math.round(cardW * 1.75);
@@ -626,16 +1257,15 @@ function HomeScreen({ navigation }: any) {
     }).filter(Boolean), [items, epMap, progress]);
 
   const myList = useMemo(() => items.filter((i: any) => list.includes(i.id)), [items, list]);
+  const goDetail = (id: string) => navigationRef.navigate("Detail", { itemId: id });
 
   if (libLoading) return <SafeAreaView style={styles.center}><ActivityIndicator color={C.red} size="large" /><Text style={styles.muted}>Carico la libreria…</Text></SafeAreaView>;
   if (!featured) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Libreria vuota</Text></SafeAreaView>;
 
-  const goDetail = (id: string) => navigation.navigate("Detail", { itemId: id });
-
   return (
     <View style={styles.screen}>
       <StatusBar barStyle="light-content" />
-      <TopBar navigation={navigation} />
+      <TopBar />
       <ScrollView showsVerticalScrollIndicator={false}>
         <View style={styles.hero}>
           {featured.backdrop ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
@@ -654,7 +1284,7 @@ function HomeScreen({ navigation }: any) {
             </View>
             <Text numberOfLines={3} style={styles.heroDesc}>{featured.overview}</Text>
             <View style={styles.actions}>
-              <Pressable onPress={() => navigation.navigate("Player", { itemId: featured.id })} style={styles.whiteButton}>
+              <Pressable onPress={() => P.open(featured)} style={styles.whiteButton}>
                 <Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text>
               </Pressable>
               <Pressable onPress={() => goDetail(featured.id)} style={styles.ghostButton}>
@@ -663,26 +1293,21 @@ function HomeScreen({ navigation }: any) {
             </View>
           </View>
         </View>
-
         <View style={styles.rows}>
           <Row title="Continua a guardare" data={continueData} keyExtractor={(x: any) => x.ep?.id || x.item.id}
             renderItem={({ item: x }: any) => (
               <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW}
                 progress={progress[x.ep?.id || x.item.id]}
-                onPress={() => navigation.navigate("Player", { itemId: x.item.id, episode: x.ep })}
-                onLongPress={() => goDetail(x.item.id)} />
+                onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />
             )} />
           <Row title="Prossimi episodi" data={nextUp} keyExtractor={(x: any) => x.ep.id}
             renderItem={({ item: x }: any) => (
               <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW}
                 progress={progress[x.ep.id]}
-                onPress={() => navigation.navigate("Player", { itemId: x.item.id, episode: x.ep })}
-                onLongPress={() => goDetail(x.item.id)} />
+                onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />
             )} />
           <Row title="La tua lista" data={myList} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => (
-              <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />
-            )} />
+            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
           <Row title="Aggiunti di recente" data={[...items].sort((a: any, b: any) => b.added - a.added)} keyExtractor={(x: any) => x.id}
             renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
           <Row title="Film" data={items.filter((i: any) => i.type === "movie")} keyExtractor={(x: any) => x.id}
@@ -695,21 +1320,21 @@ function HomeScreen({ navigation }: any) {
   );
 }
 
-function SearchScreen({ navigation }: any) {
+function SearchScreen() {
   const { items } = useApp();
   const [q, setQ] = useState("");
   const res = q.trim() ? items.filter((i: any) => i.title.toLowerCase().includes(q.toLowerCase()) || i.genres.join(" ").toLowerCase().includes(q.toLowerCase())) : [];
   return (
     <SafeAreaView style={styles.screen}>
       <View style={styles.searchHeader}>
-        <IconButton name="arrow-back" onPress={() => navigation.goBack()} />
+        <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
         <TextInput autoFocus value={q} onChangeText={setQ} placeholder="Cerca titoli, generi…" placeholderTextColor={C.faint}
           autoCapitalize="none" autoCorrect={false} style={styles.searchInput} />
       </View>
       <FlatList data={res} keyExtractor={(i: any) => i.id} numColumns={3} contentContainerStyle={styles.grid}
         renderItem={({ item }) => (
           <View style={styles.gridItem}>
-            <MediaCard item={item} width="100%" onPress={() => navigation.navigate("Detail", { itemId: item.id })} />
+            <MediaCard item={item} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: item.id })} />
             <Text numberOfLines={1} style={styles.gridTitle}>{item.title}</Text>
           </View>
         )}
@@ -718,8 +1343,9 @@ function SearchScreen({ navigation }: any) {
   );
 }
 
-function DetailScreen({ route, navigation }: any) {
+function DetailScreen({ route }: any) {
   const { session, items, progress, list, toggleList } = useApp();
+  const P = usePlayer();
   const item = items.find((x: any) => x.id === route.params.itemId);
   const [seasons, setSeasons] = useState<any[]>(item?.seasons || []);
   const [season, setSeason] = useState(1);
@@ -746,7 +1372,7 @@ function DetailScreen({ route, navigation }: any) {
           : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + item.hue + ",55%,22%)" }]} />}
         <LinearGradient colors={["rgba(8,8,11,0.2)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
         <SafeAreaView style={styles.detailHeroContent}>
-          <IconButton name="arrow-back" onPress={() => navigation.goBack()} />
+          <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
           <Text style={styles.detailTitle}>{item.title}</Text>
           <View style={styles.metaRow}>
             <Text style={styles.match}>{item.match}% compatibile</Text>
@@ -755,7 +1381,7 @@ function DetailScreen({ route, navigation }: any) {
           </View>
           <Text numberOfLines={4} style={styles.heroDesc}>{item.overview}</Text>
           <View style={styles.actions}>
-            <Pressable onPress={() => navigation.navigate("Player", { itemId: item.id, episode: ep })} style={styles.whiteButton}>
+            <Pressable onPress={() => P.open(item, ep)} style={styles.whiteButton}>
               <Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text>
             </Pressable>
             <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, inList && styles.roundOn]}>
@@ -765,11 +1391,9 @@ function DetailScreen({ route, navigation }: any) {
           {inList && <Text style={styles.inListNote}>Nella tua lista</Text>}
         </SafeAreaView>
       </View>
-
       <View style={styles.detailBody}>
         <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{item.cast.join(", ") || "–"}</Text>
         <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{item.genres.join(", ") || "–"}</Text>
-
         {item.type === "series" && (
           <>
             <View style={styles.seasonHeader}><Text style={styles.sectionTitle}>Episodi</Text>{loading && <ActivityIndicator color={C.red} />}</View>
@@ -784,10 +1408,10 @@ function DetailScreen({ route, navigation }: any) {
               const p = progress[e.id];
               const pct = p && p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0;
               return (
-                <Pressable key={e.id} onPress={() => navigation.navigate("Player", { itemId: item.id, episode: e })} style={styles.episode}>
+                <Pressable key={e.id} onPress={() => P.open(item, e)} style={styles.episode}>
                   <Text style={styles.episodeNum}>{e.episode}</Text>
                   <View style={styles.episodeThumb}>
-                    <Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} onError={() => {}} />
+                    <Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} />
                     {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
                   </View>
                   <View style={{ flex: 1 }}>
@@ -800,14 +1424,13 @@ function DetailScreen({ route, navigation }: any) {
             })}
           </>
         )}
-
         {!!similar.length && (
           <>
             <Text style={styles.sectionTitle}>Altri titoli simili</Text>
             <View style={styles.similarGrid}>
               {similar.map((x: any) => (
                 <View key={x.id} style={styles.similarItem}>
-                  <MediaCard item={x} width="100%" onPress={() => navigation.navigate("Detail", { itemId: x.id })} />
+                  <MediaCard item={x} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: x.id })} />
                 </View>
               ))}
             </View>
@@ -815,513 +1438,6 @@ function DetailScreen({ route, navigation }: any) {
         )}
       </View>
     </ScrollView>
-  );
-}
-
-function PlayerScreen({ route, navigation }: any) {
-  const { session, items, epMap, progress, settings, setSettings, saveProgress } = useApp();
-  const dim = useWindowDimensions();
-  const insets = useSafeAreaInsets();
-  const item = items.find((x: any) => x.id === route.params.itemId);
-
-  const [episode, setEpisode] = useState<any>(route.params.episode || epMap[route.params.episodeId] || null);
-  const [info, setInfo] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [buffering, setBuffering] = useState(false);
-  const [error, setError] = useState("");
-  const [playing, setPlaying] = useState(false);
-  const [position, setPosition] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [scrubbing, setScrubbing] = useState(false);
-  const [scrub, setScrub] = useState(0);
-  const [controls, setControls] = useState(true);
-  const [menu, setMenu] = useState<string | null>(null);
-  const [ended, setEnded] = useState(false);
-  const [nextEp, setNextEp] = useState<any>(null);
-  const [countdown, setCountdown] = useState(8);
-  const [landscape, setLandscape] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [videoSize, setVideoSize] = useState({ w: 16, h: 9 });
-
-  const [cues, setCues] = useState<any[]>([]);
-  const [subIndex, setSubIndex] = useState<number | null>(null);
-  const [subBusy, setSubBusy] = useState(false);
-
-  const player = useVideoPlayer(null, p => { p.loop = false; });
-  const baseOffset = useRef(0);
-  const pendingSeek = useRef<number | null>(null);
-  const seekLock = useRef(0);
-  const scrubbingRef = useRef(false);
-  const finishedRef = useRef(false);
-  const retried = useRef(false);
-  const lastSave = useRef(0);
-  const positionRef = useRef(0);
-  const infoRef = useRef<any>(null);
-  const optsRef = useRef<any>({});
-  const episodeRef = useRef<any>(null);
-  const noticeTimer = useRef<any>(null);
-  const subIndexRef = useRef<number | null>(null);
-  const subLangRef = useRef<string>("");
-
-  useEffect(() => { infoRef.current = info; }, [info]);
-  useEffect(() => { episodeRef.current = episode; }, [episode]);
-  useEffect(() => { positionRef.current = position; }, [position]);
-  useEffect(() => { subIndexRef.current = subIndex; }, [subIndex]);
-  useEffect(() => () => {
-    ScreenOrientation.unlockAsync().catch(() => {});
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-  }, []);
-
-  function flashNotice(msg: string) {
-    setNotice(msg);
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    noticeTimer.current = setTimeout(() => setNotice(""), 2800);
-  }
-
-  async function loadSubTrack(stream: any, silent = false) {
-    const inf = infoRef.current;
-    if (!inf || !stream) return;
-    if (session.mode === "demo") { if (!silent) flashNotice("Nessun sottotitolo nella demo."); return; }
-    if (!isTextSub(stream)) {
-      if (!silent) flashNotice("Sottotitoli grafici (PGS): serve il transcoding, non supportato qui.");
-      return;
-    }
-    setSubBusy(true);
-    try {
-      const raw = await fetchSubtitleText(session, inf.id, inf.mediaSourceId, stream.Index);
-      const parsed = parseSubtitles(raw);
-      if (!parsed.length) throw new Error("Nessuna battuta leggibile nel file.");
-      setCues(parsed);
-      setSubIndex(stream.Index);
-      subIndexRef.current = stream.Index;
-      subLangRef.current = String(stream.Language || "");
-      if (!silent) flashNotice("Sottotitoli: " + (stream.DisplayTitle || stream.Language || "attivi"));
-    } catch (e: any) {
-      setCues([]); setSubIndex(null); subIndexRef.current = null;
-      if (!silent) flashNotice("Sottotitoli: " + (e.message || "errore"));
-    } finally {
-      setSubBusy(false);
-    }
-  }
-
-  async function load(opts: any = {}, epArg = episodeRef.current, startAt = 0) {
-    if (!item) return;
-    setLoading(true); setBuffering(false); setError(""); setEnded(false);
-    optsRef.current = { ...optsRef.current, ...opts };
-    seekLock.current = Date.now() + 1200;
-    try {
-      const inf = await getPlayback(session, epArg ? epArg.id : item.id, settings, {
-        ...optsRef.current,
-        startSeconds: startAt,
-        demoUrl: epArg?.video || item.video,
-        duration: epArg?.duration || item.duration
-      });
-      infoRef.current = inf;
-      setInfo(inf);
-      setDuration(inf.duration || epArg?.duration || item.duration || 0);
-      baseOffset.current = inf.startOffset || 0;
-      pendingSeek.current = inf.hls ? null : startAt;
-      setPosition(startAt);
-      positionRef.current = startAt;
-      player.replace({ uri: inf.url });
-
-      if (subIndexRef.current != null) {
-        const list = inf.subs || [];
-        const match = list.find((s: any) => s.Index === subIndexRef.current)
-          || list.find((s: any) => String(s.Language || "") === subLangRef.current && isTextSub(s));
-        if (match) loadSubTrack(match, true);
-        else { setCues([]); setSubIndex(null); subIndexRef.current = null; }
-      }
-    } catch (e: any) {
-      setError(e.message || "Errore di riproduzione.");
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (!item) return;
-    let alive = true;
-    (async () => {
-      let ep = route.params.episode || epMap[route.params.episodeId] || null;
-      if (item.type === "series" && !ep) {
-        const ss = await loadSeasons(session, item);
-        ep = targetEpisode(ss, progress);
-      }
-      if (!alive) return;
-      setEpisode(ep);
-      episodeRef.current = ep;
-      const id = ep ? ep.id : item.id;
-      const start = isWatched(progress[id]) ? 0 : (route.params.resume ?? (progress[id]?.position || 0));
-      await load({}, ep, start);
-    })();
-    return () => {
-      alive = false;
-      if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true);
-    };
-  }, [item?.id]);
-
-  useEventListener(player, "statusChange", ({ status, error }: any) => {
-    if (status === "readyToPlay") {
-      setBuffering(false);
-      setLoading(false);
-      try {
-        const vt = player.videoTrack;
-        if (vt?.width && vt?.height) setVideoSize({ w: vt.width, h: vt.height });
-      } catch {}
-      if (pendingSeek.current != null) {
-        const t = pendingSeek.current;
-        pendingSeek.current = null;
-        try { player.currentTime = t; } catch {}
-      }
-      try { player.play(); } catch {}
-    } else if (status === "loading") {
-      setBuffering(true);
-    } else if (status === "error") {
-      setBuffering(false);
-      if (!retried.current && infoRef.current?.method === "DirectPlay") {
-        retried.current = true;
-        flashNotice("Formato non supportato: passo al transcoding…");
-        load({ force: true }, episodeRef.current, positionRef.current);
-      } else {
-        setError(error?.message || "Il dispositivo non riesce a decodificare questo stream.");
-        setLoading(false);
-      }
-    }
-  });
-
-  useEventListener(player, "videoTrackChange", ({ videoTrack }: any) => {
-    if (videoTrack?.width && videoTrack?.height) setVideoSize({ w: videoTrack.width, h: videoTrack.height });
-  });
-
-  useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
-    if (scrubbingRef.current || Date.now() < seekLock.current) return;
-    const pos = baseOffset.current + (currentTime || 0);
-    positionRef.current = pos;
-    setPosition(pos);
-    const dur = infoRef.current?.duration || player.duration || 0;
-    if (dur > 0) setDuration(dur);
-    const id = episodeRef.current ? episodeRef.current.id : item.id;
-    if (Date.now() - lastSave.current > 5000 && dur > 0) {
-      lastSave.current = Date.now();
-      saveProgress(id, pos, dur);
-    }
-    if (dur > 0 && pos >= dur - 1 && !finishedRef.current) {
-      finishedRef.current = true;
-      handleEnd();
-    }
-  });
-
-  useEventListener(player, "playingChange", ({ isPlaying }: any) => setPlaying(!!isPlaying));
-
-  useEffect(() => {
-    try { player.playbackRate = settings.speed; } catch {}
-    try { player.loop = settings.loop; } catch {}
-  }, [settings.speed, settings.loop]);
-
-  useEffect(() => {
-    if (!info) return;
-    reportPlayback(session, "start", info, positionRef.current, false);
-    const t = setInterval(() => reportPlayback(session, "progress", info, positionRef.current, !playing), 10000);
-    return () => clearInterval(t);
-  }, [info?.url]);
-
-  useEffect(() => {
-    if (!controls || !playing || menu || loading || buffering) return;
-    const t = setTimeout(() => setControls(false), 4000);
-    return () => clearTimeout(t);
-  }, [controls, playing, menu, loading, buffering]);
-
-  useEffect(() => {
-    if (!ended || !nextEp || !settings.autoplay) return;
-    setCountdown(8);
-    const t = setInterval(() => setCountdown(c => { if (c <= 1) { clearInterval(t); playEpisode(nextEp); return 0; } return c - 1; }), 1000);
-    return () => clearInterval(t);
-  }, [ended, nextEp]);
-
-  async function handleEnd() {
-    const id = episodeRef.current ? episodeRef.current.id : item.id;
-    const dur = infoRef.current?.duration || duration;
-    saveProgress(id, dur, dur);
-    let nx = null;
-    if (item.type === "series" && episodeRef.current) {
-      const ss = await loadSeasons(session, item);
-      nx = findNextEpisode(ss, episodeRef.current);
-    }
-    setNextEp(nx);
-    setEnded(true);
-  }
-
-  function seekTo(target: number) {
-    const dur = infoRef.current?.duration || duration || 0;
-    const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
-    seekLock.current = Date.now() + 1200;
-    setPosition(T);
-    positionRef.current = T;
-    finishedRef.current = false;
-    if (infoRef.current?.hls) {
-      load(optsRef.current, episodeRef.current, T);
-    } else {
-      try { player.currentTime = T; } catch {}
-    }
-  }
-
-  function togglePlay() {
-    if (loading || buffering) return;
-    if (playing) player.pause(); else player.play();
-    setControls(true);
-  }
-
-  async function rotate() {
-    try {
-      if (landscape) { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); setLandscape(false); }
-      else { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT); setLandscape(true); }
-    } catch {}
-    setControls(true);
-  }
-
-  async function switchAudio(index: number) {
-    setMenu(null);
-    flashNotice("Cambio traccia audio…");
-    await load({ audioIndex: index, force: true }, episodeRef.current, positionRef.current);
-    flashNotice("Audio: " + (infoRef.current?.audio?.find((a: any) => a.Index === index)?.DisplayTitle || index));
-  }
-
-  function selectSub(stream: any | null) {
-    setMenu(null);
-    if (!stream) {
-      setCues([]); setSubIndex(null); subIndexRef.current = null; subLangRef.current = "";
-      flashNotice("Sottotitoli disattivati");
-      return;
-    }
-    loadSubTrack(stream);
-  }
-
-  function playEpisode(ep: any) {
-    setEnded(false); setNextEp(null); setEpisode(ep); episodeRef.current = ep;
-    finishedRef.current = false; retried.current = false; optsRef.current = {};
-    load({}, ep, 0);
-  }
-
-  const activeCue = useMemo(() => {
-    if (!cues.length) return null;
-    const t = position;
-    for (let i = 0; i < cues.length; i++) {
-      if (t >= cues[i].start && t <= cues[i].end) return cues[i];
-      if (cues[i].start > t) break;
-    }
-    return null;
-  }, [cues, position]);
-
-  if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
-
-  const title = episode ? episode.title : item.title;
-  const subtitle = episode ? item.title + " · S" + episode.season + ":E" + episode.episode : item.year + " · " + item.genres.join(", ");
-  const menuW = Math.min(400, dim.width - 32);
-  const menuH = Math.min(dim.height * 0.82, 560);
-  const activeAudio = info?.audio?.find((a: any) => a.Index === info.audioIndex);
-  const activeSub = (info?.subs || []).find((s: any) => s.Index === subIndex);
-  const busy = loading || buffering;
-
-  const aspect = videoSize.w && videoSize.h ? videoSize.w / videoSize.h : 16 / 9;
-  let vw = dim.width;
-  let vh = dim.width / aspect;
-  if (vh > dim.height) { vh = dim.height; vw = dim.height * aspect; }
-
-  return (
-    <View style={styles.playerRoot}>
-      <StatusBar hidden />
-
-      <View style={styles.videoWrap} pointerEvents="none">
-        <VideoView player={player} style={{ width: vw, height: vh }} contentFit="contain" nativeControls={false} />
-      </View>
-
-      <Pressable style={StyleSheet.absoluteFill} onPress={() => setControls(v => !v)} />
-
-      {!!activeCue && !error && (
-        <View style={[styles.subBox, { bottom: controls ? insets.bottom + 108 : insets.bottom + 36 }]} pointerEvents="none">
-          <Text style={[styles.subText, { fontSize: settings.subSize, lineHeight: settings.subSize * 1.32 }]}>
-            {activeCue.text}
-          </Text>
-        </View>
-      )}
-
-      {!!notice && <View style={[styles.notice, { top: insets.top + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
-
-      {!!error && (
-        <View style={[styles.playerError, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
-          <Ionicons name="warning-outline" size={48} color={C.amber} />
-          <Text style={styles.emptyTitle}>Video non caricabile</Text>
-          <Text style={styles.muted}>{error}</Text>
-          <Pressable onPress={() => load({ force: true }, episodeRef.current, positionRef.current)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Riprova in transcoding</Text></Pressable>
-          <Pressable onPress={() => navigation.goBack()} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
-        </View>
-      )}
-
-      {settings.stats && info && !error && (
-        <View style={[styles.statsPanel, { top: controls ? insets.top + 64 : insets.top + 8 }]} pointerEvents="none">
-          <Text style={styles.statsTitle}>STATISTICHE</Text>
-          <Text style={styles.statsLine}>Metodo: {info.method}</Text>
-          <Text style={styles.statsLine}>Qualità: {info.quality}</Text>
-          <Text style={styles.statsLine}>Posizione: {fmt(position)} / {fmt(duration)}</Text>
-          <Text style={styles.statsLine}>Audio: {activeAudio?.DisplayTitle || activeAudio?.Language || "default"}</Text>
-          <Text style={styles.statsLine}>Sub: {activeSub?.DisplayTitle || "off"} ({cues.length} battute)</Text>
-          <Text style={styles.statsLine}>{info.reason}</Text>
-        </View>
-      )}
-
-      {controls && !ended && !error && (
-        <>
-          <LinearGradient colors={["rgba(0,0,0,0.75)", "transparent"]} style={styles.playerTopScrim} pointerEvents="none" />
-          <View style={[styles.playerTop, { top: insets.top + 8 }]}>
-            <IconButton name="arrow-back" size={26} onPress={() => navigation.goBack()} />
-            <View style={{ flex: 1 }}>
-              <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text>
-              <Text numberOfLines={1} style={styles.playerSub}>{subtitle}</Text>
-            </View>
-            <IconButton name="sync-outline" size={24} onPress={rotate} />
-          </View>
-
-          <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.playerBottomScrim} pointerEvents="none" />
-          <View style={[styles.playerBottom, { bottom: insets.bottom + 8 }]}>
-            <Slider style={{ width: "100%", height: 34 }} minimumValue={0} maximumValue={Math.max(1, duration)}
-              value={scrubbing ? scrub : position} minimumTrackTintColor={C.red}
-              maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
-              onSlidingStart={() => { scrubbingRef.current = true; setScrubbing(true); setScrub(positionRef.current); }}
-              onValueChange={setScrub}
-              onSlidingComplete={seekTo} />
-            <View style={styles.playerControls}>
-              <Text style={styles.playerTime}>{fmt(scrubbing ? scrub : position)} <Text style={styles.faint}>/ {fmt(duration)}</Text></Text>
-              <View style={{ flex: 1 }} />
-              <IconButton name="musical-notes-outline" onPress={() => setMenu("audio")} />
-              <Pressable onPress={() => setMenu("subs")} style={[styles.iconButton, subIndex != null && styles.iconActive]}>
-                <Ionicons name="chatbox-ellipses-outline" size={22} color={C.text} />
-              </Pressable>
-              <Pressable onPress={() => setMenu("quality")} style={styles.hdButton}>
-                <View style={styles.hdBox}>
-                  <Text style={styles.hdText}>{info?.quality && info.quality !== "auto" ? info.quality + "p" : "HD"}</Text>
-                </View>
-              </Pressable>
-              <IconButton name="settings-outline" onPress={() => setMenu("root")} />
-            </View>
-          </View>
-        </>
-      )}
-
-      {(busy || subBusy) ? (
-        <View style={styles.centerSpin} pointerEvents="none">
-          <ActivityIndicator color={C.red} size="large" />
-        </View>
-      ) : (controls && !ended && !error) ? (
-        <Pressable onPress={togglePlay} style={styles.centerPlay} hitSlop={30}>
-          <Ionicons name={playing ? "pause" : "play"} size={62} color="#fff" style={styles.centerIcon} />
-        </Pressable>
-      ) : null}
-
-      {ended && (
-        <View style={[styles.endOverlay, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
-          {nextEp ? (
-            <>
-              <Text style={styles.endLabel}>Prossimo episodio</Text>
-              <Pressable onPress={() => playEpisode(nextEp)} style={styles.nextCard}>
-                <View style={styles.nextThumb} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.episodeTitle}>S{nextEp.season}:E{nextEp.episode} · {nextEp.title}</Text>
-                  <Text style={styles.muted}>{item.title}</Text>
-                </View>
-                {settings.autoplay && <Text style={styles.countdown}>{countdown}</Text>}
-              </Pressable>
-              <View style={styles.actions}>
-                <Pressable onPress={() => playEpisode(nextEp)} style={styles.whiteButton}><Ionicons name="play" size={20} color="#000" /><Text style={styles.whiteButtonText}>Guarda subito</Text></Pressable>
-                <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={styles.endLabel}>Fine</Text>
-              <View style={styles.actions}>
-                <Pressable onPress={() => { setEnded(false); finishedRef.current = false; seekTo(0); }} style={styles.whiteButton}>
-                  <Ionicons name="refresh" size={20} color="#000" /><Text style={styles.whiteButtonText}>Riguarda</Text>
-                </Pressable>
-                <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
-              </View>
-            </>
-          )}
-        </View>
-      )}
-
-      <Modal visible={!!menu} transparent animationType="fade" onRequestClose={() => setMenu(null)}>
-        <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => setMenu(null)}>
-          <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
-            <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
-              {menu === "root" && (
-                <>
-                  <MenuHeader title="Impostazioni player" onBack={() => setMenu(null)} onClose={() => setMenu(null)} />
-                  <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => setMenu("speed")} />
-                  <MenuItem label="Dimensione sottotitoli" value={settings.subSize + "px"} onPress={() => setMenu("subsize")} />
-                  <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
-                  <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
-                  <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
-                  <MenuItem label="Ruota schermo" value={landscape ? "Orizzontale" : "Verticale"} onPress={rotate} />
-                  <MenuItem label="Impostazioni complete" onPress={() => navigation.replace("Settings")} />
-                </>
-              )}
-              {menu === "speed" && (
-                <>
-                  <MenuHeader title="Velocità" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => (
-                    <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />
-                  ))}
-                </>
-              )}
-              {menu === "subsize" && (
-                <>
-                  <MenuHeader title="Dimensione sottotitoli" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  {[14, 16, 18, 20, 24, 28, 32].map(s => (
-                    <MenuItem key={s} label={s + " px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />
-                  ))}
-                </>
-              )}
-              {menu === "quality" && (
-                <>
-                  <MenuHeader title="Qualità" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  {["auto", "2160", "1080", "720", "480", "360"].map(q => (
-                    <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(info?.quality) === q}
-                      onPress={() => { setMenu(null); flashNotice("Qualità: " + (q === "auto" ? "auto" : q + "p")); load({ quality: q, force: q !== "auto" }, episodeRef.current, positionRef.current); }} />
-                  ))}
-                  <Text style={styles.menuNote}>Le qualità inferiori ad "auto" attivano il transcoding del server.</Text>
-                </>
-              )}
-              {menu === "audio" && (
-                <>
-                  <MenuHeader title="Audio" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  {(info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia audio selezionabile.</Text>}
-                  {(info?.audio || []).map((a: any) => (
-                    <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={info?.audioIndex === a.Index} onPress={() => switchAudio(a.Index)} />
-                  ))}
-                  <Text style={styles.menuNote}>Il cambio audio ricarica lo stream mantenendo la posizione.</Text>
-                </>
-              )}
-              {menu === "subs" && (
-                <>
-                  <MenuHeader title="Sottotitoli" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  <MenuItem label="Disattivati" selected={subIndex == null} onPress={() => selectSub(null)} />
-                  {(info?.subs || []).map((s: any) => (
-                    <MenuItem
-                      key={s.Index}
-                      label={(s.DisplayTitle || s.Language || "Sottotitoli " + s.Index) + (isTextSub(s) ? "" : "  · grafico")}
-                      selected={subIndex === s.Index}
-                      disabled={!isTextSub(s)}
-                      onPress={() => selectSub(s)} />
-                  ))}
-                  {(info?.subs || []).length === 0 && <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text>}
-                  <Text style={styles.menuNote}>I sottotitoli di testo vengono scaricati e disegnati sopra il video: nessun transcoding, la riproduzione non si interrompe.</Text>
-                </>
-              )}
-            </ScrollView>
-          </Pressable>
-        </Pressable>
-      </Modal>
-    </View>
   );
 }
 
@@ -1349,7 +1465,7 @@ function Toggle({ label, value, onToggle }: any) {
   );
 }
 
-function SettingsScreen({ navigation }: any) {
+function SettingsScreen() {
   const { session, settings, setSettings, reloadLibrary, resetLocal, setSession } = useApp();
   const dim = useWindowDimensions();
   const twoCol = dim.width > 700;
@@ -1363,7 +1479,7 @@ function SettingsScreen({ navigation }: any) {
   return (
     <SafeAreaView style={styles.screen}>
       <View style={styles.searchHeader}>
-        <IconButton name="arrow-back" onPress={() => navigation.goBack()} />
+        <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
         <Text style={styles.pageTitle}>Impostazioni</Text>
       </View>
       <ScrollView contentContainerStyle={[styles.settingsScroll, twoCol && styles.settingsScrollWide]} keyboardShouldPersistTaps="handled">
@@ -1374,17 +1490,18 @@ function SettingsScreen({ navigation }: any) {
           <Toggle label="Risparmio dati" value={settings.saveData} onToggle={() => setSettings({ ...settings, saveData: !settings.saveData })} />
           <Toggle label="Prossimo episodio automatico" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
           <Toggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
+          <Toggle label="Continua in background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
+          <Toggle label="Picture-in-Picture all'uscita" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
           <Choice label="Velocità" value={settings.speed} options={[[0.5, "0.5×"], [0.75, "0.75×"], [1, "1×"], [1.25, "1.25×"], [1.5, "1.5×"], [2, "2×"]]} onChange={(v: number) => setSettings({ ...settings, speed: v })} />
         </View>
-
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Audio e sottotitoli</Text>
           <Choice label="Lingua audio" value={settings.audioLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, audioLang: v })} />
           <Choice label="Lingua sottotitoli" value={settings.subLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
-          <Choice label="Dimensione sottotitoli" value={settings.subSize} options={[[14, "14"], [16, "16"], [18, "18"], [20, "20"], [24, "24"], [28, "28"], [32, "32"]]} onChange={(v: number) => setSettings({ ...settings, subSize: v })} />
+          <Toggle label="Sottotitoli automatici" value={settings.autoSub} onToggle={() => setSettings({ ...settings, autoSub: !settings.autoSub })} />
+          <Choice label="Dimensione sottotitoli" value={settings.subSize} options={[[14, "14"], [16, "16"], [18, "18"], [20, "20"], [24, "24"], [28, "28"]]} onChange={(v: number) => setSettings({ ...settings, subSize: v })} />
           <Toggle label="Statistiche riproduzione" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
         </View>
-
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Interfaccia</Text>
           <Text style={styles.settingLabel}>Dimensione locandine: {settings.posterSize}px</Text>
@@ -1395,7 +1512,6 @@ function SettingsScreen({ navigation }: any) {
           <Toggle label="Animazioni" value={settings.animations} onToggle={() => setSettings({ ...settings, animations: !settings.animations })} />
           <Toggle label="Barre di progresso" value={settings.progressBars} onToggle={() => setSettings({ ...settings, progressBars: !settings.progressBars })} />
         </View>
-
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Server</Text>
           <Text style={styles.muted}>{session.mode === "demo" ? "Modalità demo" : session.server}</Text>
@@ -1465,8 +1581,8 @@ export default function App() {
   useEffect(() => { if (session) reloadLibrary(); }, [session?.token, session?.mode]);
 
   const reshuffle = () => setFeatured(pickFeatured(items, progress, epMap, list));
-  const saveProgress = (id: string, position: number, duration: number) =>
-    setProgress((p: any) => ({ ...p, [id]: { position, duration, updated: Date.now() } }));
+  const saveProgress = (id: string, pos: number, dur: number) =>
+    setProgress((p: any) => ({ ...p, [id]: { position: pos, duration: dur, updated: Date.now() } }));
   const toggleList = (id: string) => setList(l => (l.includes(id) ? l.filter(x => x !== id) : [...l, id]));
 
   async function resetLocal() {
@@ -1483,17 +1599,22 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AppCtx.Provider value={value}>
-        {!session ? <LoginScreen /> : (
-          <NavigationContainer theme={navTheme}>
-            <Stack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
-              <Stack.Screen name="Home" component={HomeScreen} />
-              <Stack.Screen name="Search" component={SearchScreen} />
-              <Stack.Screen name="Detail" component={DetailScreen} />
-              <Stack.Screen name="Player" component={PlayerScreen} />
-              <Stack.Screen name="Settings" component={SettingsScreen} />
-            </Stack.Navigator>
-          </NavigationContainer>
-        )}
+        <PlayerProvider>
+          <View style={{ flex: 1, backgroundColor: C.bg }}>
+            {!session ? <LoginScreen /> : (
+              <NavigationContainer ref={navigationRef} theme={navTheme}>
+                <Stack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
+                  <Stack.Screen name="Home" component={HomeScreen} />
+                  <Stack.Screen name="Search" component={SearchScreen} />
+                  <Stack.Screen name="Detail" component={DetailScreen} />
+                  <Stack.Screen name="Settings" component={SettingsScreen} />
+                </Stack.Navigator>
+              </NavigationContainer>
+            )}
+            <MiniPlayer />
+            <PlayerOverlay />
+          </View>
+        </PlayerProvider>
       </AppCtx.Provider>
     </SafeAreaProvider>
   );
@@ -1503,8 +1624,10 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: C.bg },
   center: { flex: 1, backgroundColor: C.bg, alignItems: "center", justifyContent: "center", padding: 24, gap: 12 },
   muted: { color: C.muted, fontSize: 13 },
+  mutedSm: { color: C.muted, fontSize: 12, textAlign: "center" },
   faint: { color: C.faint, fontSize: 12 },
   emptyTitle: { color: C.text, fontSize: 20, fontWeight: "800" },
+  emptyTitleSm: { color: C.text, fontSize: 16, fontWeight: "800" },
   logo: { fontSize: 56, fontWeight: "900", color: C.red, letterSpacing: 2 },
   logoSub: { color: C.muted, letterSpacing: 4, textTransform: "uppercase", fontSize: 12, marginTop: -8, marginBottom: 16 },
   loginScroll: { padding: 24, gap: 6 },
@@ -1521,8 +1644,10 @@ const styles = StyleSheet.create({
   ok: { color: C.green },
   bad: { color: "#ff6b72", marginTop: 8 },
   primaryButton: { backgroundColor: C.red, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 20, alignItems: "center", justifyContent: "center", marginTop: 16 },
-  primaryButtonText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  primaryButtonSm: { backgroundColor: C.red, borderRadius: 8, paddingVertical: 9, paddingHorizontal: 16, alignItems: "center" },
+  primaryButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
   secondaryButton: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingVertical: 12, paddingHorizontal: 18, alignItems: "center", justifyContent: "center" },
+  secondaryButtonSm: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 8, paddingVertical: 9, paddingHorizontal: 16, alignItems: "center" },
   secondaryButtonText: { color: C.text, fontWeight: "800" },
   fixButton: { backgroundColor: "#ffb22412", borderColor: "#ffb22455", borderWidth: 1, borderRadius: 10, paddingVertical: 11, alignItems: "center", justifyContent: "center", marginTop: 10 },
   fixButtonText: { color: "#ffd58a", fontWeight: "800", fontSize: 13 },
@@ -1532,8 +1657,7 @@ const styles = StyleSheet.create({
   topBar: { paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
   topLogo: { color: C.red, fontSize: 26, fontWeight: "900", letterSpacing: 1 },
   iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
-  iconActive: { backgroundColor: "#ffffff22" },
-  pressed: { backgroundColor: "#ffffff1c" },
+  pressed: { backgroundColor: "#ffffff22" },
   face: { backgroundColor: C.red, alignItems: "center", justifyContent: "center" },
   profileMenu: { width: "88%", maxWidth: 400, backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
   profileHead: { flexDirection: "row", alignItems: "center", gap: 14, padding: 18, borderBottomWidth: 1, borderBottomColor: C.line },
@@ -1544,16 +1668,16 @@ const styles = StyleSheet.create({
   heroKicker: { color: C.muted, fontWeight: "800", letterSpacing: 2, fontSize: 12 },
   shuffleBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: "#ffffff1a", alignItems: "center", justifyContent: "center" },
   heroTitle: { color: C.text, fontSize: 42, fontWeight: "900", textTransform: "uppercase", marginBottom: 10 },
-  metaRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 },
+  metaRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 4 },
   match: { color: C.green, fontWeight: "800" },
   metaText: { color: C.text, fontWeight: "600" },
   badge: { color: C.muted, borderColor: C.faint, borderWidth: 1, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, fontSize: 11, fontWeight: "700" },
   heroDesc: { color: "#dadade", fontSize: 15, lineHeight: 22, marginBottom: 18 },
-  actions: { flexDirection: "row", alignItems: "center", gap: 12, flexWrap: "wrap" },
-  whiteButton: { backgroundColor: "#fff", borderRadius: 8, paddingHorizontal: 18, paddingVertical: 11, flexDirection: "row", alignItems: "center", gap: 8 },
-  whiteButtonText: { color: "#000", fontWeight: "800", fontSize: 15 },
-  ghostButton: { backgroundColor: "rgba(110,110,122,0.45)", borderRadius: 8, paddingHorizontal: 18, paddingVertical: 11, flexDirection: "row", alignItems: "center", gap: 8 },
-  ghostButtonText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  actions: { flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  whiteButton: { backgroundColor: "#fff", borderRadius: 8, paddingHorizontal: 16, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 8 },
+  whiteButtonText: { color: "#000", fontWeight: "800", fontSize: 14 },
+  ghostButton: { backgroundColor: "rgba(110,110,122,0.45)", borderRadius: 8, paddingHorizontal: 16, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 8 },
+  ghostButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
   rows: { marginTop: -20, paddingBottom: 40 },
   row: { marginTop: 22 },
   rowTitle: { color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
@@ -1580,10 +1704,10 @@ const styles = StyleSheet.create({
   detailHero: { minHeight: 560, justifyContent: "flex-end" },
   detailHeroContent: { padding: 20, paddingBottom: 34 },
   detailTitle: { color: C.text, fontSize: 40, fontWeight: "900", textTransform: "uppercase", marginTop: 16, marginBottom: 10 },
-  detailBody: { padding: 20, paddingBottom: 60 },
+  detailBody: { padding: 20, paddingBottom: 90 },
   inListNote: { color: C.green, fontSize: 12, fontWeight: "700", marginTop: 10 },
   facts: { color: C.muted, fontSize: 13, marginBottom: 8 },
-  sectionTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginTop: 8, marginBottom: 12 },
+  sectionTitle: { color: C.text, fontSize: 20, fontWeight: "800", marginTop: 18, marginBottom: 12 },
   seasonHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
   seasonChip: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 16, paddingVertical: 8, marginRight: 8 },
   seasonChipOn: { backgroundColor: "#fff", borderColor: "#fff" },
@@ -1598,35 +1722,44 @@ const styles = StyleSheet.create({
   similarItem: { width: "31%" },
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
   roundOn: { borderColor: C.green },
-  playerRoot: { flex: 1, backgroundColor: "#000" },
-  videoWrap: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", backgroundColor: "#000" },
-  subBox: { position: "absolute", left: 16, right: 16, alignItems: "center", zIndex: 15 },
-  subText: { color: "#fff", fontWeight: "600", textAlign: "center", textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4, backgroundColor: "rgba(0,0,0,0.45)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, overflow: "hidden" },
-  centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center", zIndex: 60 },
-  playerError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.95)", alignItems: "center", justifyContent: "center", padding: 24, gap: 12, zIndex: 50 },
-  notice: { position: "absolute", top: 70, alignSelf: "center", backgroundColor: "rgba(8,8,11,0.9)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, maxWidth: "86%", zIndex: 55 },
-  noticeText: { color: C.text, fontSize: 13, fontWeight: "700", textAlign: "center" },
-  playerTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 120 },
-  playerBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 160 },
-  playerTop: { position: "absolute", top: 12, left: 12, right: 12, flexDirection: "row", alignItems: "center", gap: 10, zIndex: 20 },
-  playerTitle: { color: "#fff", fontWeight: "800", fontSize: 16 },
-  playerSub: { color: "#d2d2d8", fontSize: 12 },
-  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center", zIndex: 30 },
+  overlayRoot: { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, zIndex: 100 },
+  overlayLand: { justifyContent: "center", alignItems: "center", backgroundColor: "#000" },
+  landWrap: { flex: 1, width: "100%", alignItems: "center", justifyContent: "center", backgroundColor: "#000" },
+  videoBox: { backgroundColor: "#000", overflow: "hidden", position: "relative" },
+  infoPanel: { flex: 1, backgroundColor: C.bg },
+  infoTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginBottom: 4 },
+  infoSub: { color: C.muted, fontSize: 13, marginBottom: 10 },
+  infoDesc: { color: "#d6d6de", fontSize: 14, lineHeight: 21, marginBottom: 12 },
+  subLoading: { color: C.amber, fontSize: 11, fontWeight: "700" },
+  statsInline: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 14 },
+  vTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 70 },
+  vBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 110 },
+  vTop: { position: "absolute", top: 4, left: 4, right: 4, flexDirection: "row", alignItems: "center", zIndex: 20 },
+  vBottom: { position: "absolute", left: 8, right: 8, bottom: 2, zIndex: 20 },
+  vControls: { flexDirection: "row", alignItems: "center", gap: 0 },
+  vError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.94)", alignItems: "center", justifyContent: "center", padding: 16, gap: 10, zIndex: 40 },
+  subBox: { position: "absolute", left: 12, right: 12, alignItems: "center", zIndex: 15 },
+  subText: { color: "#fff", fontWeight: "600", textAlign: "center", textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4, backgroundColor: "rgba(0,0,0,0.5)", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5, overflow: "hidden" },
+  centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -30, marginTop: -30, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 30 },
+  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -36, marginTop: -36, width: 72, height: 72, alignItems: "center", justifyContent: "center", zIndex: 25 },
   centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
-  playerBottom: { position: "absolute", left: 12, right: 12, bottom: 8, zIndex: 20 },
-  playerControls: { flexDirection: "row", alignItems: "center", gap: 2 },
-  playerTime: { color: "#fff", fontWeight: "700", fontSize: 13 },
-  hdButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
-  hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 19, alignItems: "center", justifyContent: "center" },
+  playerTime: { color: "#fff", fontWeight: "700", fontSize: 12 },
+  hdButton: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+  hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 18, alignItems: "center", justifyContent: "center" },
   hdText: { color: "#fff", fontWeight: "900", fontSize: 10, lineHeight: 12, textAlign: "center", includeFontPadding: false },
-  statsPanel: { position: "absolute", left: 12, backgroundColor: "rgba(8,8,11,0.82)", borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 10, maxWidth: "72%", zIndex: 25 },
   statsTitle: { color: C.green, fontWeight: "900", fontSize: 10, letterSpacing: 1.4, marginBottom: 5 },
   statsLine: { color: "#d6d6de", fontSize: 11, lineHeight: 16 },
-  endOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.93)", alignItems: "center", justifyContent: "center", padding: 24, gap: 18, zIndex: 45 },
-  endLabel: { color: C.muted, textTransform: "uppercase", letterSpacing: 2, fontWeight: "800", fontSize: 12 },
-  nextCard: { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 14, padding: 14, width: "100%" },
-  nextThumb: { width: 120, aspectRatio: 16 / 9, borderRadius: 8, backgroundColor: C.surface3 },
-  countdown: { color: C.red, fontWeight: "900", fontSize: 22 },
+  endLabel: { color: C.muted, textTransform: "uppercase", letterSpacing: 2, fontWeight: "800", fontSize: 11 },
+  nextCard: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 12, padding: 10, width: "100%" },
+  nextThumb: { width: 90, aspectRatio: 16 / 9, borderRadius: 6, backgroundColor: C.surface3 },
+  notice: { position: "absolute", alignSelf: "center", backgroundColor: "rgba(8,8,11,0.92)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, maxWidth: "88%", zIndex: 120 },
+  noticeText: { color: C.text, fontSize: 12.5, fontWeight: "700", textAlign: "center" },
+  mini: { position: "absolute", left: 8, right: 8, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 12, overflow: "hidden", zIndex: 90 },
+  miniRow: { flexDirection: "row", alignItems: "center", gap: 8, padding: 6 },
+  miniVideo: { width: 96, aspectRatio: 16 / 9, borderRadius: 7, overflow: "hidden", backgroundColor: "#000" },
+  miniTitle: { color: C.text, fontWeight: "800", fontSize: 13 },
+  miniSub: { color: C.muted, fontSize: 11 },
+  miniProgress: { height: 3, backgroundColor: "rgba(255,255,255,0.18)" },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 16 },
   menu: { backgroundColor: "rgba(16,16,22,0.99)", borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
   menuItem: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
@@ -1640,7 +1773,7 @@ const styles = StyleSheet.create({
   switchKnob: { width: 18, height: 18, borderRadius: 9, backgroundColor: "#fff" },
   switchKnobOn: { transform: [{ translateX: 18 }] },
   pageTitle: { color: C.text, fontSize: 24, fontWeight: "800" },
-  settingsScroll: { padding: 16, paddingBottom: 60, gap: 16 },
+  settingsScroll: { padding: 16, paddingBottom: 90, gap: 16 },
   settingsScrollWide: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start" },
   settingsCard: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, padding: 18 },
   halfCard: { width: "48%", flexGrow: 1 },
