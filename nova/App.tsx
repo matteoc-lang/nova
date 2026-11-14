@@ -3,10 +3,11 @@ import {
   ActivityIndicator, Alert, FlatList, Image, ImageBackground, Modal, Pressable,
   ScrollView, StatusBar, StyleSheet, Text, TextInput, View, useWindowDimensions
 } from "react-native";
+import { useEventListener } from "expo";
+import { useVideoPlayer, VideoView } from "expo-video";
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { Audio, ResizeMode, Video } from "expo-av";
 import * as SecureStore from "expo-secure-store";
 import * as ScreenOrientation from "expo-screen-orientation";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -46,7 +47,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.1.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.2.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -177,17 +178,18 @@ function nativeProfile(force: boolean, bitrate: number) {
 
 async function getPlayback(session: any, itemId: string, settings: any, opts: any = {}) {
   if (session.mode === "demo") {
-    return { id: itemId, url: opts.demoUrl, method: "DirectPlay", quality: opts.quality || "auto", duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }], subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null, mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264" };
+    return { id: itemId, url: opts.demoUrl, method: "DirectPlay", quality: opts.quality || "auto", duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }], subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null, mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264", startOffset: 0 };
   }
   const quality = opts.quality || settings.quality || "auto";
   const rates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
   let bitrate = rates[quality] || 40000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
   let force = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || opts.audioIndex != null || (opts.subtitleIndex != null && opts.subtitleIndex >= 0);
+  const startSeconds = Math.max(0, opts.startSeconds || 0);
   const req = async (f: boolean) => {
     const r = await fetch(session.server + "/Items/" + itemId + "/PlaybackInfo?userId=" + session.userId, {
       method: "POST", headers: authHeaders(session.token),
-      body: JSON.stringify({ DeviceProfile: nativeProfile(f, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate })
+      body: JSON.stringify({ DeviceProfile: nativeProfile(f, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate, StartTimeTicks: Math.round(startSeconds * 1e7) })
     });
     if (!r.ok) throw new Error("PlaybackInfo HTTP " + r.status);
     return r.json();
@@ -217,12 +219,13 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     url = session.server + ms.TranscodingUrl + (ms.TranscodingUrl.includes("?") ? "&" : "?") + "api_key=" + session.token;
     if (ai != null) url += "&AudioStreamIndex=" + ai;
     if (si != null) url += "&SubtitleStreamIndex=" + si;
+    if (startSeconds > 0) url += "&StartTimeTicks=" + Math.round(startSeconds * 1e7);
     method = ms.SupportsDirectStream ? "DirectStream" : "Transcode";
   } else {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   }
-  return { id: itemId, url, method, quality, duration: (ms.RunTimeTicks || 0) / 1e7, audio, subs, audioIndex: ai, subtitleIndex: si, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId, reason: force ? "Transcoding richiesto o fallback" : "Direct Play nativo" };
+  return { id: itemId, url, method, quality, duration: (ms.RunTimeTicks || 0) / 1e7, audio, subs, audioIndex: ai, subtitleIndex: si, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId, reason: force ? "Transcoding richiesto o fallback" : "Direct Play nativo", startOffset: method === "Transcode" ? startSeconds : 0 };
 }
 
 async function reportPlayback(session: any, kind: string, info: any, position: number, paused: boolean) {
@@ -336,9 +339,7 @@ function Poster({ item, wide, ep, progress }: any) {
           <Text style={styles.posterFallbackTitle}>{item.title}</Text>
         </View>
       )}
-      {!!ep && (
-        <View style={styles.epBadge}><Text style={styles.epBadgeText}>S{ep.season} · E{ep.episode}</Text></View>
-      )}
+      {!!ep && <View style={styles.epBadge}><Text style={styles.epBadgeText}>S{ep.season} · E{ep.episode}</Text></View>}
       {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
       {wide && (
         <View style={styles.wideLabel}>
@@ -548,7 +549,7 @@ function HomeScreen({ navigation }: any) {
 }
 
 function SearchScreen({ navigation }: any) {
-  const { items, settings } = useApp();
+  const { items } = useApp();
   const [q, setQ] = useState("");
   const res = q.trim() ? items.filter((i: any) => i.title.toLowerCase().includes(q.toLowerCase()) || i.genres.join(" ").toLowerCase().includes(q.toLowerCase())) : [];
   return (
@@ -700,11 +701,11 @@ function MenuHeader({ title, onBack, onClose }: any) {
 }
 
 function PlayerScreen({ route, navigation }: any) {
-  const { session, items, settings, setSettings, saveProgress } = useApp();
+  const { session, items, epMap, progress, settings, setSettings, saveProgress } = useApp();
   const dim = useWindowDimensions();
   const item = items.find((x: any) => x.id === route.params.itemId);
 
-  const [episode, setEpisode] = useState<any>(route.params.episode || null);
+  const [episode, setEpisode] = useState<any>(route.params.episode || epMap[route.params.episodeId] || null);
   const [info, setInfo] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -719,10 +720,11 @@ function PlayerScreen({ route, navigation }: any) {
   const [nextEp, setNextEp] = useState<any>(null);
   const [countdown, setCountdown] = useState(8);
   const [landscape, setLandscape] = useState(false);
+  const [notice, setNotice] = useState("");
 
-  const videoRef = useRef<any>(null);
-  const pendingSeek = useRef<number | null>(null);
-  const resumeRef = useRef(0);
+  const player = useVideoPlayer(null, p => { p.loop = false; });
+  const baseOffset = useRef(0);
+  const pendingClientSeek = useRef<number | null>(null);
   const seekLock = useRef(0);
   const scrubbingRef = useRef(false);
   const finishedRef = useRef(false);
@@ -730,41 +732,117 @@ function PlayerScreen({ route, navigation }: any) {
   const lastSave = useRef(0);
   const positionRef = useRef(0);
   const infoRef = useRef<any>(null);
+  const optsRef = useRef<any>({});
+  const episodeRef = useRef<any>(null);
+  const noticeTimer = useRef<any>(null);
 
-  const source = useMemo(() => (info?.url ? { uri: info.url } : undefined), [info?.url]);
-
-  useEffect(() => { Audio.setAudioModeAsync({ playsInSilentModeIOS: true }); }, []);
   useEffect(() => { infoRef.current = info; }, [info]);
+  useEffect(() => { episodeRef.current = episode; }, [episode]);
   useEffect(() => { positionRef.current = position; }, [position]);
-  useEffect(() => () => { ScreenOrientation.unlockAsync().catch(() => {}); }, []);
+  useEffect(() => () => { ScreenOrientation.unlockAsync().catch(() => {}); if (noticeTimer.current) clearTimeout(noticeTimer.current); }, []);
 
-  async function load(opts: any = {}, epArg = episode) {
+  function flashNotice(msg: string) {
+    setNotice(msg);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(""), 2600);
+  }
+
+  async function load(opts: any = {}, epArg = episodeRef.current, startAt = 0) {
     if (!item) return;
-    setLoading(true); setError("");
+    setLoading(true); setError(""); setEnded(false);
+    optsRef.current = { ...optsRef.current, ...opts };
     try {
       const inf = await getPlayback(session, epArg ? epArg.id : item.id, settings, {
-        ...opts, demoUrl: epArg?.video || item.video, duration: epArg?.duration || item.duration
+        ...optsRef.current,
+        startSeconds: startAt,
+        demoUrl: epArg?.video || item.video,
+        duration: epArg?.duration || item.duration
       });
+      infoRef.current = inf;
       setInfo(inf);
-      setDuration(inf.duration || epArg?.duration || item.duration || 0);
-    } catch (e: any) { setError(e.message || "Errore di riproduzione."); } finally { setLoading(false); }
+      const fullDuration = inf.duration || epArg?.duration || item.duration || 0;
+      setDuration(fullDuration);
+      baseOffset.current = inf.startOffset || 0;
+      pendingClientSeek.current = inf.method === "Transcode" ? null : startAt;
+      setPosition(startAt);
+      positionRef.current = startAt;
+      player.replace({ uri: inf.url });
+    } catch (e: any) {
+      setError(e.message || "Errore di riproduzione.");
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
     if (!item) return;
+    let alive = true;
     (async () => {
-      let ep = episode;
+      let ep = route.params.episode || epMap[route.params.episodeId] || null;
       if (item.type === "series" && !ep) {
         const ss = await loadSeasons(session, item);
-        ep = targetEpisode(ss, {});
-        setEpisode(ep);
+        ep = targetEpisode(ss, progress);
       }
+      if (!alive) return;
+      setEpisode(ep);
+      episodeRef.current = ep;
       const id = ep ? ep.id : item.id;
-      resumeRef.current = route.params.resume ?? 0;
-      await load({}, ep);
+      const start = route.params.resume ?? (progress[id]?.position || 0);
+      if (isWatched(progress[id])) start === 0;
+      await load({}, ep, isWatched(progress[id]) ? 0 : start);
     })();
-    return () => { if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true); };
+    return () => {
+      alive = false;
+      if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true);
+    };
   }, [item?.id]);
+
+  useEventListener(player, "statusChange", ({ status, error }: any) => {
+    if (status === "readyToPlay") {
+      if (pendingClientSeek.current != null) {
+        const t = pendingClientSeek.current;
+        pendingClientSeek.current = null;
+        try { player.currentTime = t; } catch {}
+      }
+      try { player.play(); } catch {}
+      setLoading(false);
+    } else if (status === "loading") {
+      setLoading(true);
+    } else if (status === "error") {
+      if (!retried.current && infoRef.current?.method === "DirectPlay") {
+        retried.current = true;
+        flashNotice("Formato non supportato: passo al transcoding…");
+        load({ force: true }, episodeRef.current, positionRef.current);
+      } else {
+        setError(error?.message || "Il dispositivo non riesce a decodificare questo stream.");
+        setLoading(false);
+      }
+    }
+  });
+
+  useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
+    if (scrubbingRef.current || Date.now() < seekLock.current) return;
+    const truePos = baseOffset.current + (currentTime || 0);
+    positionRef.current = truePos;
+    setPosition(truePos);
+    const dur = player.duration || infoRef.current?.duration || 0;
+    if (dur > 0) setDuration(infoRef.current?.duration || dur);
+    const id = episodeRef.current ? episodeRef.current.id : item.id;
+    if (Date.now() - lastSave.current > 5000 && dur > 0) {
+      lastSave.current = Date.now();
+      saveProgress(id, truePos, infoRef.current?.duration || dur);
+    }
+    if (infoRef.current?.duration && truePos >= infoRef.current.duration - 1 && !finishedRef.current) {
+      finishedRef.current = true;
+      handleEnd();
+    }
+  });
+
+  useEventListener(player, "playingChange", ({ isPlaying }: any) => setPlaying(!!isPlaying));
+
+  useEffect(() => {
+    try { player.playbackRate = settings.speed; } catch {}
+    try { player.loop = settings.loop; } catch {}
+  }, [settings.speed, settings.loop]);
 
   useEffect(() => {
     if (!info) return;
@@ -786,15 +864,33 @@ function PlayerScreen({ route, navigation }: any) {
     return () => clearInterval(t);
   }, [ended, nextEp]);
 
-  async function reload(opts: any) {
-    pendingSeek.current = positionRef.current;
+  async function handleEnd() {
+    const id = episodeRef.current ? episodeRef.current.id : item.id;
+    saveProgress(id, infoRef.current?.duration || duration, infoRef.current?.duration || duration);
+    let nx = null;
+    if (item.type === "series" && episodeRef.current) {
+      const ss = await loadSeasons(session, item);
+      nx = findNextEpisode(ss, episodeRef.current);
+    }
+    setNextEp(nx);
+    setEnded(true);
+  }
+
+  async function seekTo(target: number) {
+    const dur = infoRef.current?.duration || duration || 0;
+    const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
+    seekLock.current = Date.now() + 1200;
+    setPosition(T); positionRef.current = T;
     finishedRef.current = false;
-    await load(opts, episode);
+    if (infoRef.current?.method === "Transcode") {
+      await load(optsRef.current, episodeRef.current, T);
+    } else {
+      try { player.currentTime = T; } catch {}
+    }
   }
 
   async function togglePlay() {
-    if (!videoRef.current) return;
-    if (playing) await videoRef.current.pauseAsync(); else await videoRef.current.playAsync();
+    if (playing) player.pause(); else player.play();
     setControls(true);
   }
 
@@ -806,50 +902,25 @@ function PlayerScreen({ route, navigation }: any) {
     setControls(true);
   }
 
-  async function onStatus(st: any) {
-    if (!st) return;
-    if (st.isLoaded) {
-      const dur = (st.durationMillis || 0) / 1000;
-      if (dur > 0) setDuration(dur);
-      setPlaying(!!st.isPlaying);
-      const locked = scrubbingRef.current || Date.now() < seekLock.current;
-      if (!locked && !st.isBuffering) {
-        const pos = (st.positionMillis || 0) / 1000;
-        setPosition(pos); positionRef.current = pos;
-        const id = episode ? episode.id : item.id;
-        if (Date.now() - lastSave.current > 6000 && dur > 0) { lastSave.current = Date.now(); saveProgress(id, pos, dur); }
-      }
-      if (st.didJustFinish && !finishedRef.current) {
-        finishedRef.current = true;
-        const id = episode ? episode.id : item.id;
-        saveProgress(id, dur, dur);
-        if (settings.loop) { finishedRef.current = false; videoRef.current?.setPositionAsync(0); videoRef.current?.playAsync(); }
-        else {
-          let nx = null;
-          if (item.type === "series" && episode) { const ss = await loadSeasons(session, item); nx = findNextEpisode(ss, episode); }
-          setNextEp(nx); setEnded(true);
-        }
-      }
-    }
-    if (st.error) {
-      if (!retried.current && info?.method === "DirectPlay") { retried.current = true; reload({ force: true }); }
-      else setError(String(st.error));
-    }
+  async function switchAudio(index: number) {
+    setMenu(null);
+    flashNotice("Cambio traccia audio…");
+    await load({ audioIndex: index, force: true }, episodeRef.current, positionRef.current);
+    flashNotice("Traccia audio: " + (infoRef.current?.audio?.find((a: any) => a.Index === index)?.DisplayTitle || index));
   }
 
-  async function onLoad() {
-    try {
-      if (pendingSeek.current != null) { const t = pendingSeek.current; pendingSeek.current = null; await videoRef.current?.setPositionAsync(t); }
-      else if (resumeRef.current > 0) { await videoRef.current?.setPositionAsync(resumeRef.current); }
-      resumeRef.current = 0;
-      await videoRef.current?.playAsync();
-    } catch {}
+  async function switchSubs(index: number | null) {
+    setMenu(null);
+    flashNotice(index == null ? "Disattivo i sottotitoli…" : "Attivo i sottotitoli…");
+    await load({ subtitleIndex: index == null ? -1 : index, force: true }, episodeRef.current, positionRef.current);
+    const label = index == null ? "Disattivati" : (infoRef.current?.subs?.find((s: any) => s.Index === index)?.DisplayTitle || "Attivi");
+    flashNotice("Sottotitoli: " + label);
   }
 
   function playEpisode(ep: any) {
-    setEnded(false); setNextEp(null); setEpisode(ep); setInfo(null);
-    setPosition(0); positionRef.current = 0; finishedRef.current = false;
-    load({}, ep);
+    setEnded(false); setNextEp(null); setEpisode(ep); episodeRef.current = ep;
+    finishedRef.current = false; retried.current = false; optsRef.current = {};
+    load({}, ep, 0);
   }
 
   if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
@@ -858,26 +929,40 @@ function PlayerScreen({ route, navigation }: any) {
   const subtitle = episode ? item.title + " · S" + episode.season + ":E" + episode.episode : item.year + " · " + item.genres.join(", ");
   const menuW = Math.min(400, dim.width - 32);
   const menuH = Math.min(dim.height * 0.82, 560);
+  const activeAudio = info?.audio?.find((a: any) => a.Index === info.audioIndex);
+  const activeSub = info?.subs?.find((s: any) => s.Index === info.subtitleIndex);
 
   return (
     <View style={styles.playerRoot}>
       <StatusBar hidden />
-      {source && (
-        <Video ref={videoRef} source={source} style={StyleSheet.absoluteFill} resizeMode={ResizeMode.CONTAIN}
-          rate={settings.speed} useNativeControls={false} onLoad={onLoad} onPlaybackStatusUpdate={onStatus} />
-      )}
+      <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} />
 
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setControls(v => !v)} />
 
-      {loading && <View style={styles.playerLoading}><ActivityIndicator color={C.red} size="large" /></View>}
+      {loading && <View style={styles.playerLoading} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>}
+
+      {!!notice && <View style={styles.notice} pointerEvents="none"><Text style={styles.noticeText}>{notice}</Text></View>}
 
       {!!error && (
         <View style={styles.playerError}>
           <Ionicons name="warning-outline" size={48} color={C.amber} />
           <Text style={styles.emptyTitle}>Video non caricabile</Text>
           <Text style={styles.muted}>{error}</Text>
-          <Pressable onPress={() => reload({ force: true })} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Riprova in transcoding</Text></Pressable>
+          <Pressable onPress={() => load({ force: true }, episodeRef.current, positionRef.current)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Riprova in transcoding</Text></Pressable>
           <Pressable onPress={() => navigation.goBack()} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
+        </View>
+      )}
+
+      {settings.stats && info && !error && (
+        <View style={[styles.statsPanel, { top: controls ? 72 : 16 }]} pointerEvents="none">
+          <Text style={styles.statsTitle}>STATISTICHE</Text>
+          <Text style={styles.statsLine}>Metodo: {info.method}</Text>
+          <Text style={styles.statsLine}>Qualità: {info.quality}</Text>
+          <Text style={styles.statsLine}>Offset server: {fmt(baseOffset.current)}</Text>
+          <Text style={styles.statsLine}>Posizione: {fmt(position)} / {fmt(duration)}</Text>
+          <Text style={styles.statsLine}>Audio: {activeAudio?.DisplayTitle || activeAudio?.Language || "default"}</Text>
+          <Text style={styles.statsLine}>Sub: {activeSub?.DisplayTitle || "off"}</Text>
+          <Text style={styles.statsLine}>{info.reason}</Text>
         </View>
       )}
 
@@ -904,13 +989,7 @@ function PlayerScreen({ route, navigation }: any) {
               maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
               onSlidingStart={() => { scrubbingRef.current = true; setScrubbing(true); setScrub(positionRef.current); }}
               onValueChange={setScrub}
-              onSlidingComplete={async v => {
-                seekLock.current = Date.now() + 1500;
-                try { await videoRef.current?.setPositionAsync(v); } catch {}
-                setPosition(v); positionRef.current = v;
-                finishedRef.current = false;
-                scrubbingRef.current = false; setScrubbing(false);
-              }} />
+              onSlidingComplete={seekTo} />
             <View style={styles.playerControls}>
               <Text style={styles.playerTime}>{fmt(scrubbing ? scrub : position)} <Text style={styles.faint}>/ {fmt(duration)}</Text></Text>
               <View style={{ flex: 1 }} />
@@ -923,7 +1002,6 @@ function PlayerScreen({ route, navigation }: any) {
               </Pressable>
               <IconButton name="settings-outline" onPress={() => setMenu("root")} />
             </View>
-            {settings.stats && info && <Text style={styles.statsText}>{info.method} · {info.quality} · {info.reason}</Text>}
           </View>
         </>
       )}
@@ -950,7 +1028,7 @@ function PlayerScreen({ route, navigation }: any) {
             <>
               <Text style={styles.endLabel}>Fine</Text>
               <View style={styles.actions}>
-                <Pressable onPress={() => { setEnded(false); finishedRef.current = false; videoRef.current?.setPositionAsync(0); videoRef.current?.playAsync(); }} style={styles.whiteButton}>
+                <Pressable onPress={() => { setEnded(false); finishedRef.current = false; seekTo(0); }} style={styles.whiteButton}>
                   <Ionicons name="refresh" size={20} color="#000" /><Text style={styles.whiteButtonText}>Riguarda</Text>
                 </Pressable>
                 <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
@@ -988,27 +1066,26 @@ function PlayerScreen({ route, navigation }: any) {
                   <MenuHeader title="Qualità" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
                   {["auto", "2160", "1080", "720", "480", "360"].map(q => (
                     <MenuItem key={q} label={q === "auto" ? "Automatica" : q + "p"} selected={String(info?.quality) === q}
-                      onPress={() => { setMenu(null); reload({ quality: q, force: q !== "auto" }); }} />
+                      onPress={() => { setMenu(null); flashNotice("Qualità: " + (q === "auto" ? "auto" : q + "p")); load({ quality: q, force: q !== "auto" }, episodeRef.current, positionRef.current); }} />
                   ))}
                 </>
               )}
               {menu === "audio" && (
                 <>
                   <MenuHeader title="Audio" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  {(info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia audio alternativa.</Text>}
+                  {(info?.audio || []).length === 0 && <Text style={styles.menuNote}>Questo file non espone tracce audio selezionabili.</Text>}
                   {(info?.audio || []).map((a: any) => (
-                    <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio"} selected={info?.audioIndex === a.Index}
-                      onPress={() => { setMenu(null); reload({ audioIndex: a.Index, force: true }); }} />
+                    <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={info?.audioIndex === a.Index} onPress={() => switchAudio(a.Index)} />
                   ))}
+                  <Text style={styles.menuNote}>Cambiando audio il server ricrea lo stream dalla posizione attuale.</Text>
                 </>
               )}
               {menu === "subs" && (
                 <>
                   <MenuHeader title="Sottotitoli" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
-                  <MenuItem label="Disattivati" selected={info?.subtitleIndex == null} onPress={() => { setMenu(null); reload({ subtitleIndex: -1, force: true }); }} />
+                  <MenuItem label="Disattivati" selected={info?.subtitleIndex == null} onPress={() => switchSubs(null)} />
                   {(info?.subs || []).map((s: any) => (
-                    <MenuItem key={s.Index} label={s.DisplayTitle || s.Language || "Sottotitoli"} selected={info?.subtitleIndex === s.Index}
-                      onPress={() => { setMenu(null); reload({ subtitleIndex: s.Index, force: true }); }} />
+                    <MenuItem key={s.Index} label={s.DisplayTitle || s.Language || "Sottotitoli " + s.Index} selected={info?.subtitleIndex === s.Index} onPress={() => switchSubs(s.Index)} />
                   ))}
                   <Text style={styles.menuNote}>I sottotitoli vengono masterizzati dal server: la selezione ricarica lo stream mantenendo la posizione.</Text>
                 </>
@@ -1293,6 +1370,8 @@ const styles = StyleSheet.create({
   playerRoot: { flex: 1, backgroundColor: "#000" },
   playerLoading: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
   playerError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.95)", alignItems: "center", justifyContent: "center", padding: 24, gap: 12 },
+  notice: { position: "absolute", top: 70, alignSelf: "center", backgroundColor: "rgba(8,8,11,0.9)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9, maxWidth: "86%" },
+  noticeText: { color: C.text, fontSize: 13, fontWeight: "700", textAlign: "center" },
   playerTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 120 },
   playerBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 160 },
   playerTop: { position: "absolute", top: 12, left: 12, right: 12, flexDirection: "row", alignItems: "center", gap: 10 },
@@ -1306,7 +1385,9 @@ const styles = StyleSheet.create({
   hdButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
   hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 19, alignItems: "center", justifyContent: "center" },
   hdText: { color: "#fff", fontWeight: "900", fontSize: 10, lineHeight: 12, textAlign: "center", includeFontPadding: false },
-  statsText: { color: "#d6d6de", fontSize: 11, marginTop: 4 },
+  statsPanel: { position: "absolute", left: 12, backgroundColor: "rgba(8,8,11,0.82)", borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 10, maxWidth: "72%" },
+  statsTitle: { color: C.green, fontWeight: "900", fontSize: 10, letterSpacing: 1.4, marginBottom: 5 },
+  statsLine: { color: "#d6d6de", fontSize: 11, lineHeight: 16 },
   endOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.93)", alignItems: "center", justifyContent: "center", padding: 24, gap: 18 },
   endLabel: { color: C.muted, textTransform: "uppercase", letterSpacing: 2, fontWeight: "800", fontSize: 12 },
   nextCard: { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 14, padding: 14, width: "100%" },
