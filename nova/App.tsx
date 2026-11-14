@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, FlatList, Image, ImageBackground, Modal,
-  Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View
+  ActivityIndicator, Alert, FlatList, Image, ImageBackground, Modal, Pressable,
+  ScrollView, StatusBar, StyleSheet, Text, TextInput, View, useWindowDimensions
 } from "react-native";
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -14,28 +14,20 @@ import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
 import { LinearGradient } from "expo-linear-gradient";
 
-const DOT = "\u00B7";
-const MULT = "\u00D7";
-
 const C = {
   bg: "#08080b", surface: "#15151c", surface2: "#1d1d26", surface3: "#282833",
   line: "#30303c", text: "#f6f5f2", muted: "#a6a6b2", faint: "#70707c",
-  red: "#e50914", green: "#2ee6a8", blue: "#3b82f6", amber: "#ffb224"
+  red: "#e50914", green: "#2ee6a8", amber: "#ffb224"
 };
 
 const Stack = createNativeStackNavigator();
 const AppCtx = createContext<any>(null);
 const useApp = () => useContext(AppCtx);
-
-const navTheme = {
-  ...DefaultTheme,
-  colors: { ...DefaultTheme.colors, background: C.bg, card: C.bg, text: C.text, primary: C.red, border: C.line }
-};
+const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: C.bg, card: C.bg, text: C.text, primary: C.red, border: C.line } };
 
 const defaultSettings = {
-  streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it",
-  autoSub: false, autoplay: true, loop: false, speed: 1,
-  posterSize: 150, continueStyle: "wide",
+  streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: false,
+  autoplay: true, loop: false, speed: 1, posterSize: 150, thumbWide: true,
   animations: true, progressBars: true, stats: false, saveData: false
 };
 
@@ -54,19 +46,18 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.0.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="1.1.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
 async function fetchWithTimeout(url: string, options: any = {}, ms = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try { return await fetch(url, { ...options, signal: controller.signal }); }
-  finally { clearTimeout(timer); }
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try { return await fetch(url, { ...options, signal: c.signal }); } finally { clearTimeout(t); }
 }
 
-async function testServer(serverInput: string) {
-  const server = normalizeServer(serverInput);
+async function testServer(input: string) {
+  const server = normalizeServer(input);
   try {
     const r = await fetchWithTimeout(server + "/System/Info/Public", {}, 7000);
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -78,8 +69,8 @@ async function testServer(serverInput: string) {
   }
 }
 
-async function authenticate(serverInput: string, username: string, password: string) {
-  const server = normalizeServer(serverInput);
+async function authenticate(input: string, username: string, password: string) {
+  const server = normalizeServer(input);
   let r: Response;
   try {
     r = await fetchWithTimeout(server + "/Users/AuthenticateByName", {
@@ -93,44 +84,26 @@ async function authenticate(serverInput: string, username: string, password: str
   return { mode: "jellyfin", server, token: j.AccessToken, userId: j.User.Id, user: j.User?.Name || username };
 }
 
-async function fetchPublicUsers(session: any) {
-  if (!session || session.mode !== "jellyfin") return [];
-  try {
-    const r = await fetch(session.server + "/Users/Public", { headers: authHeaders(session.token) });
-    if (!r.ok) return [];
-    const j = await r.json();
-    return (j || []).map((u: any) => ({ id: u.Id, name: u.Name, hasPassword: u.HasPassword }));
-  } catch { return []; }
-}
+const imageUrl = (s: any, id: string, type: string, w: number) =>
+  s.server + "/Items/" + id + "/Images/" + type + "?maxWidth=" + w + "&quality=90&api_key=" + s.token;
 
-function imageUrl(session: any, id: string, type: string, width: number) {
-  return session.server + "/Items/" + id + "/Images/" + type + "?maxWidth=" + width + "&quality=90&api_key=" + session.token;
-}
-
-function mapItem(session: any, x: any) {
+function mapItem(s: any, x: any) {
   return {
-    id: x.Id, type: x.Type === "Series" ? "series" : "movie",
-    title: x.Name || "Senza titolo", year: x.ProductionYear || "", genres: x.Genres || [],
-    overview: x.Overview || "", rating: x.OfficialRating || "T",
-    match: Math.max(60, Math.min(99, Math.round((x.CommunityRating || 7) * 10 + 20))),
-    duration: (x.RunTimeTicks || 0) / 1e7,
-    cast: (x.People || []).slice(0, 5).map((p: any) => p.Name),
+    id: x.Id, type: x.Type === "Series" ? "series" : "movie", title: x.Name || "Senza titolo",
+    year: x.ProductionYear || "", genres: x.Genres || [], overview: x.Overview || "",
+    rating: x.OfficialRating || "T", match: Math.max(60, Math.min(99, Math.round((x.CommunityRating || 7) * 10 + 20))),
+    duration: (x.RunTimeTicks || 0) / 1e7, cast: (x.People || []).slice(0, 5).map((p: any) => p.Name),
     added: Date.parse(x.DateCreated) || Date.now(),
-    poster: imageUrl(session, x.Id, "Primary", 500),
-    backdrop: imageUrl(session, x.Id, "Backdrop", 1280),
+    poster: imageUrl(s, x.Id, "Primary", 500), backdrop: imageUrl(s, x.Id, "Backdrop", 1280),
     hue: ((x.Name || "").length * 47) % 360
   };
 }
 
-function mapEpisode(session: any, x: any) {
+function mapEpisode(s: any, x: any) {
   return {
-    id: x.Id, seriesId: x.SeriesId, seriesName: x.SeriesName,
-    season: x.ParentIndexNumber || 1, episode: x.IndexNumber || 1,
-    title: x.Name || "Episodio", overview: x.Overview || "",
-    duration: (x.RunTimeTicks || 0) / 1e7,
-    thumb: imageUrl(session, x.Id, "Thumb", 640),
-    seriesPoster: imageUrl(session, x.SeriesId, "Primary", 500),
-    hue: 210
+    id: x.Id, seriesId: x.SeriesId, seriesName: x.SeriesName, season: x.ParentIndexNumber || 1,
+    episode: x.IndexNumber || 1, title: x.Name || "Episodio", overview: x.Overview || "",
+    duration: (x.RunTimeTicks || 0) / 1e7, thumb: imageUrl(s, x.Id, "Primary", 500), hue: 210
   };
 }
 
@@ -141,54 +114,39 @@ async function loadLibrary(session: any) {
   if (!r.ok) throw new Error("Libreria HTTP " + r.status);
   const j = await r.json();
   const items = (j.Items || []).map((x: any) => mapItem(session, x));
-  const map: any = {};
-  items.forEach((it: any) => (map[it.id] = it));
-  const progress: any = {};
-  const epMap: any = {};
-
+  const map: any = {}; items.forEach((i: any) => (map[i.id] = i));
+  const progress: any = {}, epMap: any = {};
   for (const x of j.Items || []) {
     const ud = x.UserData;
-    if (ud && ud.PlaybackPositionTicks > 0) {
+    if (ud && ud.PlaybackPositionTicks > 0)
       progress[x.Id] = { position: ud.PlaybackPositionTicks / 1e7, duration: (x.RunTimeTicks || 0) / 1e7, updated: Date.now() };
-    }
   }
-
   try {
     const rr = await fetch(session.server + "/Users/" + session.userId +
       "/Items?Recursive=true&IncludeItemTypes=Episode,Movie&Filters=IsResumable&Fields=UserData,RunTimeTicks,SeriesName,SeriesId,ParentIndexNumber,IndexNumber", { headers });
     const jj = await rr.json();
     for (const x of jj.Items || []) {
       if (x.Type === "Episode") {
-        const ep = mapEpisode(session, x);
-        epMap[ep.id] = ep;
+        const ep = mapEpisode(session, x); epMap[ep.id] = ep;
         if (!map[ep.seriesId]) {
-          map[ep.seriesId] = {
-            id: ep.seriesId, type: "series", title: ep.seriesName || "Serie", year: "", genres: [],
-            overview: "", rating: "T", match: 90, duration: 0, cast: [], added: Date.now(),
-            poster: imageUrl(session, ep.seriesId, "Primary", 500),
-            backdrop: imageUrl(session, ep.seriesId, "Backdrop", 1280), hue: 210
-          };
+          map[ep.seriesId] = { id: ep.seriesId, type: "series", title: ep.seriesName || "Serie", year: "", genres: [], overview: "", rating: "T", match: 90, duration: 0, cast: [], added: Date.now(), poster: imageUrl(session, ep.seriesId, "Primary", 500), backdrop: imageUrl(session, ep.seriesId, "Backdrop", 1280), hue: 210 };
           items.push(map[ep.seriesId]);
         }
       }
-      if (x.UserData && x.UserData.PlaybackPositionTicks > 0) {
+      if (x.UserData && x.UserData.PlaybackPositionTicks > 0)
         progress[x.Id] = { position: x.UserData.PlaybackPositionTicks / 1e7, duration: (x.RunTimeTicks || 0) / 1e7, updated: Date.now() };
-      }
     }
   } catch {}
-
   let nextUp: any[] = [];
   try {
     const nr = await fetch(session.server + "/Shows/NextUp?userId=" + session.userId +
       "&Fields=UserData,RunTimeTicks,SeriesId,SeriesName,ParentIndexNumber,IndexNumber", { headers });
     const nj = await nr.json();
     nextUp = (nj.Items || []).map((x: any) => {
-      const ep = mapEpisode(session, x);
-      epMap[ep.id] = ep;
+      const ep = mapEpisode(session, x); epMap[ep.id] = ep;
       return { item: map[ep.seriesId], ep };
     }).filter((x: any) => x.item);
   } catch {}
-
   return { items, map, epMap, progress, nextUp };
 }
 
@@ -198,108 +156,73 @@ async function loadSeasons(session: any, item: any) {
     "&Fields=Overview,RunTimeTicks,UserData", { headers: authHeaders(session.token) });
   if (!r.ok) throw new Error("Episodi HTTP " + r.status);
   const j = await r.json();
-  const bySeason: any = {};
+  const by: any = {};
   for (const x of j.Items || []) {
     const ep = mapEpisode(session, x);
-    if (!bySeason[ep.season]) bySeason[ep.season] = { n: ep.season, name: "Stagione " + ep.season, episodes: [] };
-    bySeason[ep.season].episodes.push(ep);
+    if (!by[ep.season]) by[ep.season] = { n: ep.season, name: "Stagione " + ep.season, episodes: [] };
+    by[ep.season].episodes.push(ep);
   }
-  return Object.values(bySeason).sort((a: any, b: any) => a.n - b.n)
+  return Object.values(by).sort((a: any, b: any) => a.n - b.n)
     .map((s: any) => ({ ...s, episodes: s.episodes.sort((a: any, b: any) => a.episode - b.episode) }));
 }
 
-function nativeDeviceProfile(force: boolean, bitrate: number) {
+function nativeProfile(force: boolean, bitrate: number) {
   return {
-    MaxStreamingBitrate: bitrate, MaxStaticBitrate: 200000000, MusicStreamingTranscodingBitrate: 192000,
-    DirectPlayProfiles: force ? [] : [{
-      Container: "mp4,m4v,mov,mkv,webm", Type: "Video",
-      VideoCodec: "h264,hevc,vp9,av1", AudioCodec: "aac,mp3,ac3,eac3,opus,flac,vorbis"
-    }],
-    TranscodingProfiles: [{
-      Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac,mp3",
-      Context: "Streaming", Protocol: "hls", MaxAudioChannels: "2", MinSegments: "1", BreakOnNonKeyFrames: true
-    }],
-    SubtitleProfiles: [
-      { Format: "srt", Method: "External" }, { Format: "ass", Method: "External" }, { Format: "vtt", Method: "External" },
-      { Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" },
-      { Format: "pgs", Method: "Encode" }, { Format: "dvdsub", Method: "Encode" }
-    ]
+    MaxStreamingBitrate: bitrate, MaxStaticBitrate: 200000000,
+    DirectPlayProfiles: force ? [] : [{ Container: "mp4,m4v,mov,mkv,webm", Type: "Video", VideoCodec: "h264,hevc,vp9,av1", AudioCodec: "aac,mp3,ac3,eac3,opus,flac,vorbis" }],
+    TranscodingProfiles: [{ Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac,mp3", Context: "Streaming", Protocol: "hls", MaxAudioChannels: "2", MinSegments: "1", BreakOnNonKeyFrames: true }],
+    SubtitleProfiles: [{ Format: "srt", Method: "External" }, { Format: "ass", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "srt", Method: "Encode" }, { Format: "ass", Method: "Encode" }, { Format: "pgs", Method: "Encode" }]
   };
 }
 
 async function getPlayback(session: any, itemId: string, settings: any, opts: any = {}) {
   if (session.mode === "demo") {
-    return {
-      id: itemId, url: opts.demoUrl, method: "DirectPlay", quality: opts.quality || "auto",
-      duration: opts.duration || 0,
-      audio: [{ Index: 0, DisplayTitle: "Originale " + DOT + " AAC", Language: "eng" }],
-      subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita", Codec: "srt" }],
-      audioIndex: 0, subtitleIndex: null, mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264"
-    };
+    return { id: itemId, url: opts.demoUrl, method: "DirectPlay", quality: opts.quality || "auto", duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }], subs: [{ Index: 0, DisplayTitle: "Italiano demo", Language: "ita" }], audioIndex: 0, subtitleIndex: null, mediaSourceId: "demo", playSessionId: "demo", reason: "Demo MP4/H.264" };
   }
-
   const quality = opts.quality || settings.quality || "auto";
-  const bitrates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
-  let bitrate = bitrates[quality] || 40000000;
+  const rates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
+  let bitrate = rates[quality] || 40000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
-
-  let force = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" ||
-    opts.audioIndex != null || (opts.subtitleIndex != null && opts.subtitleIndex >= 0);
-
-  async function request(f: boolean) {
+  let force = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || opts.audioIndex != null || (opts.subtitleIndex != null && opts.subtitleIndex >= 0);
+  const req = async (f: boolean) => {
     const r = await fetch(session.server + "/Items/" + itemId + "/PlaybackInfo?userId=" + session.userId, {
       method: "POST", headers: authHeaders(session.token),
-      body: JSON.stringify({ DeviceProfile: nativeDeviceProfile(f, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate })
+      body: JSON.stringify({ DeviceProfile: nativeProfile(f, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate })
     });
     if (!r.ok) throw new Error("PlaybackInfo HTTP " + r.status);
     return r.json();
-  }
-
-  let j = await request(force);
+  };
+  let j = await req(force);
   let ms = j.MediaSources && j.MediaSources[0];
   if (!ms) throw new Error("Nessuna MediaSource disponibile.");
-
   const audio = (ms.MediaStreams || []).filter((s: any) => s.Type === "Audio");
   const subs = (ms.MediaStreams || []).filter((s: any) => s.Type === "Subtitle");
-
-  let audioIndex = opts.audioIndex;
-  if (audioIndex == null) {
+  let ai = opts.audioIndex;
+  if (ai == null) {
     const pref = audio.find((a: any) => String(a.Language || "").toLowerCase().startsWith(settings.audioLang));
-    audioIndex = pref ? pref.Index : (ms.DefaultAudioStreamIndex != null ? ms.DefaultAudioStreamIndex : audio[0]?.Index);
+    ai = pref ? pref.Index : ms.DefaultAudioStreamIndex != null ? ms.DefaultAudioStreamIndex : audio[0]?.Index;
   }
-
-  let subtitleIndex = opts.subtitleIndex;
-  if (subtitleIndex === -1) subtitleIndex = null;
-  if (subtitleIndex == null && settings.autoSub && opts.subtitleIndex !== -1) {
-    const pref = subs.find((s: any) => String(s.Language || "").toLowerCase().startsWith(settings.subLang));
-    subtitleIndex = pref ? pref.Index : null;
+  let si = opts.subtitleIndex;
+  if (si === -1) si = null;
+  if (si == null && settings.autoSub && opts.subtitleIndex !== -1) {
+    const p = subs.find((s: any) => String(s.Language || "").toLowerCase().startsWith(settings.subLang));
+    si = p ? p.Index : null;
   }
-
-  if (!force && subtitleIndex != null) {
-    force = true;
-    j = await request(true);
-    ms = (j.MediaSources && j.MediaSources[0]) || ms;
-  }
-
+  if (!force && si != null) { force = true; j = await req(true); ms = j.MediaSources[0] || ms; }
   let url: string, method: string;
   if (!force && ms.SupportsDirectPlay) {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   } else if (ms.TranscodingUrl) {
     url = session.server + ms.TranscodingUrl + (ms.TranscodingUrl.includes("?") ? "&" : "?") + "api_key=" + session.token;
-    if (audioIndex != null) url += "&AudioStreamIndex=" + audioIndex;
-    if (subtitleIndex != null) url += "&SubtitleStreamIndex=" + subtitleIndex;
+    if (ai != null) url += "&AudioStreamIndex=" + ai;
+    if (si != null) url += "&SubtitleStreamIndex=" + si;
     method = ms.SupportsDirectStream ? "DirectStream" : "Transcode";
   } else {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   }
-
-  return {
-    id: itemId, url, method, quality, duration: (ms.RunTimeTicks || 0) / 1e7,
-    audio, subs, audioIndex, subtitleIndex, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
-    reason: force ? "Transcoding richiesto o fallback" : "Direct Play nativo"
-  };
+  return { id: itemId, url, method, quality, duration: (ms.RunTimeTicks || 0) / 1e7, audio, subs, audioIndex: ai, subtitleIndex: si, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId, reason: force ? "Transcoding richiesto o fallback" : "Direct Play nativo" };
 }
 
 async function reportPlayback(session: any, kind: string, info: any, position: number, paused: boolean) {
@@ -308,10 +231,7 @@ async function reportPlayback(session: any, kind: string, info: any, position: n
   try {
     await fetch(session.server + path, {
       method: "POST", headers: authHeaders(session.token),
-      body: JSON.stringify({
-        ItemId: info.id, MediaSourceId: info.mediaSourceId, PlaySessionId: info.playSessionId,
-        PositionTicks: Math.round((position || 0) * 1e7), PlayMethod: info.method, CanSeek: true, IsPaused: paused
-      })
+      body: JSON.stringify({ ItemId: info.id, MediaSourceId: info.mediaSourceId, PlaySessionId: info.playSessionId, PositionTicks: Math.round((position || 0) * 1e7), PlayMethod: info.method, CanSeek: true, IsPaused: paused })
     });
   } catch {}
 }
@@ -323,40 +243,29 @@ function demoLibrary() {
   const now = Date.now(), day = 86400000;
   const movie = (id: string, title: string, year: number, genres: string[], hue: number, v: string, match: number, overview: string, days: number) =>
     ({ id, type: "movie", title, year, genres, hue, video: vids[v], duration: dur[v], match, overview, cast: ["Cast demo"], rating: "T", added: now - days * day });
-  const eps = (sid: string, season: number, titles: string[], hue: number) =>
-    titles.map((title, i) => {
-      const v = "abcd"[i % 4];
-      return { id: sid + "-" + season + "-" + (i + 1), seriesId: sid, season, episode: i + 1, title, overview: "Un nuovo tassello si incastra nel mosaico.", duration: dur[v], video: vids[v], hue };
-    });
+  const eps = (sid: string, sn: number, titles: string[], hue: number) => titles.map((title, i) => {
+    const v = "abcd"[i % 4];
+    return { id: sid + "-" + sn + "-" + (i + 1), seriesId: sid, season: sn, episode: i + 1, title, overview: "Un nuovo tassello si incastra nel mosaico.", duration: dur[v], video: vids[v], hue };
+  });
   const series = (id: string, title: string, year: number, genres: string[], hue: number, match: number, overview: string, seasons: any[], days: number) =>
     ({ id, type: "series", title, year, genres, hue, match, overview, cast: ["Cast demo"], rating: "T", added: now - days * day, seasons });
-
   const items = [
     movie("orbita", "Orbita Nera", 2025, ["Fantascienza", "Thriller"], 210, "d", 98, "Una stazione orbitante smette di rispondere alla Terra.", 2),
     movie("neon", "Neon Requiem", 2024, ["Thriller", "Azione"], 350, "c", 96, "Un detective insegue un fantasma digitale tra i vicoli al neon.", 9),
     movie("codice", "Codice Rosso", 2025, ["Azione"], 18, "a", 88, "Un'ex agente deve fermare un attacco informatico globale.", 4),
     movie("mare", "Sotto la Pelle del Mare", 2024, ["Documentario"], 175, "c", 89, "Tre anni di riprese negli abissi del Mediterraneo.", 12),
     movie("vela", "Vela Solare", 2022, ["Animazione", "Avventura"], 55, "a", 87, "Una piccola sonda parte per un viaggio oltre il sistema solare.", 90),
-    series("cieli", "I Cieli di Ferro", 2024, ["Fantascienza", "Drammatico"], 205, 97, "Le citta volano su piattaforme di ferro. Sotto le nuvole, qualcosa abita.", [
+    series("cieli", "I Cieli di Ferro", 2024, ["Fantascienza", "Drammatico"], 205, 97, "Le città volano su piattaforme di ferro. Sotto le nuvole, qualcosa abita.", [
       { n: 1, name: "Stagione 1", episodes: eps("cieli", 1, ["Il decollo", "Sotto le nuvole", "Ferro e cielo", "La caduta", "Vecchie rotte", "Il segnale"], 205) },
-      { n: 2, name: "Stagione 2", episodes: eps("cieli", 2, ["Ritorno a bordo", "La citta fantasma", "Gravita zero", "Il patto", "Punto di fuga", "Cieli aperti"], 225) }
+      { n: 2, name: "Stagione 2", episodes: eps("cieli", 2, ["Ritorno a bordo", "La città fantasma", "Gravità zero", "Il patto", "Punto di fuga", "Cieli aperti"], 225) }
     ], 3),
     series("palude", "Palude", 2023, ["Thriller", "Giallo"], 150, 94, "Un paese di nebbia e canali, una serie di sparizioni che nessuno collega.", [
       { n: 1, name: "Stagione 1", episodes: eps("palude", 1, ["Acqua alta", "Il canale", "Nebbia", "Radici", "La chiusa", "Marea"], 150) }
     ], 20)
   ];
-
   const map: any = {}, epMap: any = {};
-  items.forEach((it: any) => {
-    map[it.id] = it;
-    (it.seasons || []).forEach((s: any) => s.episodes.forEach((e: any) => (epMap[e.id] = e)));
-  });
-
-  const progress = {
-    neon: { position: 412, duration: 888, updated: now - 2 * day },
-    "cieli-1-3": { position: 300, duration: 888, updated: now - day }
-  };
-  return { items, map, epMap, progress, nextUp: [{ item: map.cieli, ep: epMap["cieli-1-4"] }] };
+  items.forEach((it: any) => { map[it.id] = it; (it.seasons || []).forEach((s: any) => s.episodes.forEach((e: any) => (epMap[e.id] = e))); });
+  return { items, map, epMap, progress: { neon: { position: 412, duration: 888, updated: now - 2 * day }, "cieli-1-3": { position: 300, duration: 888, updated: now - day } }, nextUp: [{ item: map.cieli, ep: epMap["cieli-1-4"] }] };
 }
 
 const isWatched = (p: any) => p && p.duration > 0 && p.position / p.duration >= 0.92;
@@ -371,13 +280,32 @@ function findNextEpisode(seasons: any[], ep: any) {
 }
 
 function targetEpisode(seasons: any[], progress: any) {
-  for (const s of seasons || []) {
-    for (const e of s.episodes || []) {
-      const p = progress[e.id];
-      if (p && p.position > 5 && !isWatched(p)) return e;
-    }
+  for (const s of seasons || []) for (const e of s.episodes || []) {
+    const p = progress[e.id];
+    if (p && p.position > 5 && !isWatched(p)) return e;
   }
   return seasons?.[0]?.episodes?.[0] || null;
+}
+
+function pickFeatured(items: any[], progress: any, epMap: any, list: string[]) {
+  if (!items.length) return null;
+  const w: any = {}; let history = 0;
+  const bump = (it: any, amount: number) => { if (!it) return; history++; (it.genres || []).forEach((g: string) => (w[g] = (w[g] || 0) + amount)); };
+  items.forEach((it: any) => {
+    const p = progress[it.id];
+    if (p && p.duration > 0 && p.position / p.duration > 0.08) bump(it, 2);
+    if (list.includes(it.id)) bump(it, 1);
+  });
+  Object.keys(progress).forEach(id => { const ep = epMap[id]; if (ep) bump(items.find((i: any) => i.id === ep.seriesId), 2); });
+  if (!history) return items[Math.floor(Math.random() * items.length)];
+  const scored = items.map((it: any) => {
+    let s = 0; (it.genres || []).forEach((g: string) => (s += w[g] || 0));
+    s += (it.match || 80) / 25;
+    if (isWatched(progress[it.id])) s -= 8;
+    return { it, s };
+  }).sort((a: any, b: any) => b.s - a.s);
+  const pool = scored.slice(0, 8);
+  return pool[Math.floor(Math.random() * pool.length)].it;
 }
 
 function IconButton({ name, onPress, size = 22, style }: any) {
@@ -389,59 +317,44 @@ function IconButton({ name, onPress, size = 22, style }: any) {
 }
 
 function Face({ size = 36 }: any) {
-  return (
-    <View style={[styles.face, { width: size, height: size, borderRadius: size * 0.22 }]}>
-      <Ionicons name="happy" size={size * 0.7} color="#fff" />
-    </View>
-  );
+  return <View style={[styles.face, { width: size, height: size, borderRadius: size * 0.22 }]}><Ionicons name="happy" size={size * 0.72} color="#fff" /></View>;
 }
 
-function Poster({ item, wide, ep, progress, fluid }: any) {
-  const uri = wide ? (ep?.thumb || item.backdrop || item.poster) : (ep?.seriesPoster || item.poster);
+function Poster({ item, wide, ep, progress }: any) {
+  const primary = wide ? (ep?.thumb || item.backdrop || item.poster) : item.poster;
+  const fallback = item.backdrop || item.poster;
+  const [uri, setUri] = useState(primary);
+  useEffect(() => { setUri(primary); }, [primary]);
   const p = progress;
   const pct = p && p.duration ? Math.max(0, Math.min(100, (p.position / p.duration) * 100)) : 0;
   return (
-    <View style={[styles.poster, fluid && { width: "100%" }]}>
+    <View style={[styles.poster, wide ? styles.posterWide : styles.posterTall]}>
       {uri ? (
-        <Image source={{ uri }} style={wide ? styles.imageWide : styles.imageTall} resizeMode="cover" />
+        <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => { if (uri !== fallback) setUri(fallback); }} />
       ) : (
-        <View style={[wide ? styles.imageWide : styles.imageTall, styles.fallback, { backgroundColor: "hsl(" + (item.hue || 210) + ",55%,22%)" }]}>
-          <Text style={styles.fallbackTitle}>{item.title}</Text>
+        <View style={[StyleSheet.absoluteFill, styles.posterFallback, { backgroundColor: "hsl(" + (item.hue || 210) + ",55%,22%)" }]}>
+          <Text style={styles.posterFallbackTitle}>{item.title}</Text>
         </View>
       )}
+      {!!ep && (
+        <View style={styles.epBadge}><Text style={styles.epBadgeText}>S{ep.season} · E{ep.episode}</Text></View>
+      )}
+      {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
       {wide && (
-        <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.posterGradient}>
-          <Text numberOfLines={1} style={styles.posterLabel}>
-            {ep ? "S" + ep.season + ":E" + ep.episode + " " + DOT + " " + ep.title : item.title}
-          </Text>
-          {!!ep && <Text numberOfLines={1} style={styles.posterSubLabel}>{item.title}</Text>}
-        </LinearGradient>
-      )}
-      {!wide && !!ep && (
-        <View style={styles.epBadge}>
-          <Text style={styles.epBadgeText}>S{ep.season}:E{ep.episode}</Text>
-        </View>
-      )}
-      {pct > 0 && (
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: pct + "%" }]} />
+        <View style={styles.wideLabel}>
+          <Text numberOfLines={1} style={styles.wideLabelTitle}>{ep ? ep.title : item.title}</Text>
+          {!!ep && <Text numberOfLines={1} style={styles.wideLabelSub}>{item.title}</Text>}
         </View>
       )}
     </View>
   );
 }
 
-function MediaCard({ item, ep, wide, fluid, onPress, progress, size }: any) {
+function MediaCard({ item, ep, wide, onPress, onLongPress, progress, width }: any) {
   return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.card,
-        fluid ? styles.cardFluid : { width: wide ? 220 : size || 150 },
-        pressed && styles.cardPressed
-      ]}
-    >
-      <Poster item={item} ep={ep} wide={wide} fluid={fluid} progress={progress} />
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={350}
+      style={({ pressed }) => [styles.card, { width }, pressed && styles.cardPressed]}>
+      <Poster item={item} ep={ep} wide={wide} progress={progress} />
     </Pressable>
   );
 }
@@ -451,11 +364,9 @@ function Row({ title, data, renderItem, keyExtractor }: any) {
   return (
     <View style={styles.row}>
       <Text style={styles.rowTitle}>{title}</Text>
-      <FlatList
-        horizontal data={data} keyExtractor={keyExtractor} renderItem={renderItem}
+      <FlatList horizontal data={data} keyExtractor={keyExtractor} renderItem={renderItem}
         showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rowContent}
-        ItemSeparatorComponent={() => <View style={{ width: 10 }} />}
-      />
+        ItemSeparatorComponent={() => <View style={{ width: 10 }} />} />
     </View>
   );
 }
@@ -465,6 +376,7 @@ function LoginScreen() {
   const [server, setServer] = useState("");
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
+  const [showPass, setShowPass] = useState(false);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -475,8 +387,8 @@ function LoginScreen() {
   }, []);
 
   async function doTest() {
-    setStatus("Verifico..."); setErr("");
-    try { const r = await testServer(server); setStatus("OK " + r.name + " " + DOT + " v" + r.version); }
+    setStatus("Verifico…"); setErr("");
+    try { const r = await testServer(server); setStatus("✓ " + r.name + " · v" + r.version); }
     catch (e: any) { setStatus(e.message); }
   }
 
@@ -487,43 +399,51 @@ function LoginScreen() {
       await AsyncStorage.setItem("nova.lastServer", s.server);
       await AsyncStorage.setItem("nova.lastUser", user);
       await setSession(s);
-    } catch (e: any) { setErr(e.message); }
-    finally { setBusy(false); }
+    } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   }
 
   return (
-    <SafeAreaView style={styles.loginRoot}>
-      <ScrollView contentContainerStyle={styles.loginScroll}>
+    <SafeAreaView style={styles.screen}>
+      <StatusBar barStyle="light-content" />
+      <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.logo}>NOVA</Text>
         <Text style={styles.logoSub}>for Jellyfin</Text>
-        <Text style={styles.loginTitle}>Il tuo cinema personale.</Text>
         <View style={styles.loginCard}>
           <Text style={styles.loginCardTitle}>Accedi</Text>
           <Text style={styles.loginCardSub}>Connettiti al tuo server Jellyfin.</Text>
+
           <Text style={styles.label}>Server</Text>
           <TextInput value={server} onChangeText={setServer} placeholder="http://192.168.1.10:8096"
-            placeholderTextColor={C.faint} autoCapitalize="none" keyboardType="url" style={styles.input} />
-          <Pressable onPress={doTest} style={styles.testButton}>
-            <Text style={styles.testButtonText}>Test connessione</Text>
-          </Pressable>
-          {!!status && <Text style={[styles.status, status.startsWith("OK") ? styles.ok : styles.bad]}>{status}</Text>}
+            placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
+
+          <Pressable onPress={doTest} style={styles.testButton}><Text style={styles.testButtonText}>Test connessione</Text></Pressable>
+          {!!status && <Text style={[styles.status, status.startsWith("✓") ? styles.ok : styles.bad]}>{status}</Text>}
+
           <Text style={styles.label}>Utente</Text>
-          <TextInput value={user} onChangeText={setUser} autoCapitalize="none" style={styles.input} />
+          <TextInput value={user} onChangeText={setUser} autoCapitalize="none" autoCorrect={false} style={styles.input} />
+
           <Text style={styles.label}>Password</Text>
-          <TextInput value={pass} onChangeText={setPass} secureTextEntry style={styles.input} />
-          {!!err && <Text style={styles.bad}>{err}</Text>}
-          <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}>
-            <Text style={styles.primaryButtonText}>{busy ? "Accesso..." : "Accedi"}</Text>
-          </Pressable>
-          <View style={styles.divider}>
-            <View style={styles.dividerLine} /><Text style={styles.dividerText}>oppure</Text><View style={styles.dividerLine} />
+          <View style={styles.passWrap}>
+            <TextInput value={pass} onChangeText={setPass} secureTextEntry={!showPass}
+              autoCapitalize="none" autoCorrect={false} autoComplete="off" importantForAutofill="no"
+              style={[styles.input, { paddingRight: 50 }]} />
+            <Pressable onPress={() => setShowPass(v => !v)} style={styles.eyeButton}>
+              <Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} />
+            </Pressable>
           </View>
+
+          {!!err && <Text style={styles.bad}>{err}</Text>}
+
+          <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}>
+            <Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text>
+          </Pressable>
+
+          <View style={styles.divider}><View style={styles.dividerLine} /><Text style={styles.dividerText}>oppure</Text><View style={styles.dividerLine} /></View>
+
           <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={styles.secondaryButton}>
             <Text style={styles.secondaryButtonText}>Esplora la demo</Text>
           </Pressable>
-          <Pressable onPress={resetLocal} style={styles.fixButton}>
-            <Text style={styles.fixButtonText}>Ripara dati locali</Text>
-          </Pressable>
+          <Pressable onPress={resetLocal} style={styles.fixButton}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -531,117 +451,53 @@ function LoginScreen() {
 }
 
 function TopBar({ navigation }: any) {
-  const { session, setSession, switchUser } = useApp();
-  const [open, setOpen] = useState(false);
-  const [users, setUsers] = useState<any[]>([]);
-
-  async function openMenu() {
-    setOpen(true);
-    setUsers(await fetchPublicUsers(session));
-  }
-
   return (
     <View style={styles.topBar}>
       <Text style={styles.topLogo}>NOVA</Text>
       <View style={{ flex: 1 }} />
       <IconButton name="search" onPress={() => navigation.navigate("Search")} />
       <IconButton name="settings-outline" onPress={() => navigation.navigate("Settings")} />
-      <Pressable onPress={openMenu} style={({ pressed }) => pressed && { opacity: 0.7 }}>
-        <Face size={34} />
-      </Pressable>
-
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.modalBackdrop} onPress={() => setOpen(false)}>
-          <Pressable style={styles.menu}>
-            <View style={styles.profileHeader}>
-              <Face size={46} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.profileName}>{session?.user || "Utente"}</Text>
-                <Text style={styles.profileServer} numberOfLines={1}>
-                  {session?.mode === "demo" ? "Modalita demo" : session?.server}
-                </Text>
-              </View>
-            </View>
-
-            {users.filter(u => u.name !== session?.user).length > 0 && (
-              <>
-                <Text style={styles.menuSection}>Cambia utente</Text>
-                {users.filter(u => u.name !== session?.user).map(u => (
-                  <Pressable key={u.id} style={styles.menuItem} onPress={() => { setOpen(false); switchUser(u.name); }}>
-                    <View style={styles.userRow}>
-                      <View style={[styles.face, { width: 28, height: 28, borderRadius: 7, backgroundColor: C.surface3 }]}>
-                        <Ionicons name="person" size={17} color={C.muted} />
-                      </View>
-                      <Text style={styles.menuItemText}>{u.name}</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={18} color={C.faint} />
-                  </Pressable>
-                ))}
-              </>
-            )}
-
-            <Text style={styles.menuSection}>Account</Text>
-            <Pressable style={styles.menuItem} onPress={() => { setOpen(false); navigation.navigate("Settings"); }}>
-              <View style={styles.userRow}>
-                <Ionicons name="settings-outline" size={20} color={C.muted} />
-                <Text style={styles.menuItemText}>Impostazioni</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.menuItem} onPress={() => { setOpen(false); setSession(null); }}>
-              <View style={styles.userRow}>
-                <Ionicons name="log-out-outline" size={20} color="#ff6b72" />
-                <Text style={[styles.menuItemText, { color: "#ff6b72" }]}>Esci</Text>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Pressable>
-      </Modal>
+      <Face size={34} />
     </View>
   );
 }
 
 function HomeScreen({ navigation }: any) {
-  const { items, epMap, progress, nextUp, libLoading, settings } = useApp();
-  const featured = items[0];
-  const wideContinue = settings.continueStyle === "wide";
+  const { items, epMap, progress, nextUp, list, libLoading, settings, featured, reshuffle } = useApp();
+  const wide = settings.thumbWide;
+  const cardW = settings.posterSize;
+  const wideW = Math.round(cardW * 1.75);
 
-  const continueData = useMemo(() => {
-    return Object.keys(progress)
-      .filter(id => progress[id].position > 5 && !isWatched(progress[id]))
-      .sort((a, b) => progress[b].updated - progress[a].updated)
-      .map(id => {
-        const ep = epMap[id];
-        if (ep) {
-          const item = items.find((x: any) => x.id === ep.seriesId);
-          return item ? { item, ep } : null;
-        }
-        const item = items.find((x: any) => x.id === id);
-        return item ? { item, ep: null } : null;
-      }).filter(Boolean);
-  }, [items, epMap, progress]);
+  const continueData = useMemo(() => Object.keys(progress)
+    .filter(id => progress[id].position > 5 && !isWatched(progress[id]))
+    .sort((a, b) => progress[b].updated - progress[a].updated)
+    .map(id => {
+      const ep = epMap[id];
+      if (ep) { const it = items.find((x: any) => x.id === ep.seriesId); return it ? { item: it, ep } : null; }
+      const it = items.find((x: any) => x.id === id); return it ? { item: it, ep: null } : null;
+    }).filter(Boolean), [items, epMap, progress]);
 
-  if (libLoading) {
-    return <SafeAreaView style={styles.center}><ActivityIndicator color={C.red} size="large" /><Text style={styles.muted}>Carico la libreria...</Text></SafeAreaView>;
-  }
-  if (!featured) {
-    return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Libreria vuota</Text><Text style={styles.muted}>Il server non ha restituito film o serie.</Text></SafeAreaView>;
-  }
+  const myList = useMemo(() => items.filter((i: any) => list.includes(i.id)), [items, list]);
 
-  const movies = items.filter((i: any) => i.type === "movie");
-  const series = items.filter((i: any) => i.type === "series");
-  const recent = [...items].sort((a: any, b: any) => b.added - a.added);
+  if (libLoading) return <SafeAreaView style={styles.center}><ActivityIndicator color={C.red} size="large" /><Text style={styles.muted}>Carico la libreria…</Text></SafeAreaView>;
+  if (!featured) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Libreria vuota</Text></SafeAreaView>;
+
+  const goDetail = (id: string) => navigation.navigate("Detail", { itemId: id });
 
   return (
-    <SafeAreaView style={styles.screen} edges={["top"]}>
+    <View style={styles.screen}>
+      <StatusBar barStyle="light-content" />
       <TopBar navigation={navigation} />
       <ScrollView showsVerticalScrollIndicator={false}>
         <View style={styles.hero}>
-          {featured.backdrop
-            ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          {featured.backdrop ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
             : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + featured.hue + ",55%,22%)" }]} />}
           <LinearGradient colors={["rgba(8,8,11,0.15)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
           <View style={styles.heroContent}>
-            <Text style={styles.heroKicker}>IN EVIDENZA</Text>
+            <View style={styles.heroKickerRow}>
+              <Text style={styles.heroKicker}>CONSIGLIATO PER TE</Text>
+              <Pressable onPress={reshuffle} style={styles.shuffleBtn}><Ionicons name="shuffle" size={16} color={C.muted} /></Pressable>
+            </View>
             <Text style={styles.heroTitle}>{featured.title}</Text>
             <View style={styles.metaRow}>
               <Text style={styles.match}>{featured.match}% compatibile</Text>
@@ -653,7 +509,7 @@ function HomeScreen({ navigation }: any) {
               <Pressable onPress={() => navigation.navigate("Player", { itemId: featured.id })} style={styles.whiteButton}>
                 <Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text>
               </Pressable>
-              <Pressable onPress={() => navigation.navigate("Detail", { itemId: featured.id })} style={styles.ghostButton}>
+              <Pressable onPress={() => goDetail(featured.id)} style={styles.ghostButton}>
                 <Ionicons name="information-circle-outline" size={22} color="#fff" /><Text style={styles.ghostButtonText}>Info</Text>
               </Pressable>
             </View>
@@ -661,61 +517,55 @@ function HomeScreen({ navigation }: any) {
         </View>
 
         <View style={styles.rows}>
-          <Row
-            title="Continua a guardare" data={continueData}
-            keyExtractor={(x: any) => x.ep?.id || x.item.id}
+          <Row title="Continua a guardare" data={continueData} keyExtractor={(x: any) => x.ep?.id || x.item.id}
             renderItem={({ item: x }: any) => (
-              <MediaCard
-                item={x.item} ep={x.ep} wide={wideContinue} size={settings.posterSize}
+              <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW}
                 progress={progress[x.ep?.id || x.item.id]}
                 onPress={() => navigation.navigate("Player", { itemId: x.item.id, episode: x.ep })}
-              />
-            )}
-          />
-          <Row
-            title="Prossimi episodi" data={nextUp} keyExtractor={(x: any) => x.ep.id}
+                onLongPress={() => goDetail(x.item.id)} />
+            )} />
+          <Row title="Prossimi episodi" data={nextUp} keyExtractor={(x: any) => x.ep.id}
             renderItem={({ item: x }: any) => (
-              <MediaCard item={x.item} ep={x.ep} wide
-                onPress={() => navigation.navigate("Player", { itemId: x.item.id, episode: x.ep })} />
-            )}
-          />
-          <Row title="Aggiunti di recente" data={recent} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} size={settings.posterSize} onPress={() => navigation.navigate("Detail", { itemId: item.id })} />} />
-          <Row title="Film" data={movies} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} size={settings.posterSize} onPress={() => navigation.navigate("Detail", { itemId: item.id })} />} />
-          <Row title="Serie TV" data={series} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} size={settings.posterSize} onPress={() => navigation.navigate("Detail", { itemId: item.id })} />} />
+              <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW}
+                progress={progress[x.ep.id]}
+                onPress={() => navigation.navigate("Player", { itemId: x.item.id, episode: x.ep })}
+                onLongPress={() => goDetail(x.item.id)} />
+            )} />
+          <Row title="La tua lista" data={myList} keyExtractor={(x: any) => x.id}
+            renderItem={({ item }: any) => (
+              <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />
+            )} />
+          <Row title="Aggiunti di recente" data={[...items].sort((a: any, b: any) => b.added - a.added)} keyExtractor={(x: any) => x.id}
+            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Film" data={items.filter((i: any) => i.type === "movie")} keyExtractor={(x: any) => x.id}
+            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Serie TV" data={items.filter((i: any) => i.type === "series")} keyExtractor={(x: any) => x.id}
+            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
         </View>
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
 function SearchScreen({ navigation }: any) {
-  const { items } = useApp();
+  const { items, settings } = useApp();
   const [q, setQ] = useState("");
-  const res = q.trim()
-    ? items.filter((i: any) => i.title.toLowerCase().includes(q.toLowerCase()) || i.genres.join(" ").toLowerCase().includes(q.toLowerCase()))
-    : [];
-
+  const res = q.trim() ? items.filter((i: any) => i.title.toLowerCase().includes(q.toLowerCase()) || i.genres.join(" ").toLowerCase().includes(q.toLowerCase())) : [];
   return (
-    <SafeAreaView style={styles.screen} edges={["top"]}>
+    <SafeAreaView style={styles.screen}>
       <View style={styles.searchHeader}>
         <IconButton name="arrow-back" onPress={() => navigation.goBack()} />
-        <TextInput autoFocus value={q} onChangeText={setQ} placeholder="Cerca titoli, generi..."
-          placeholderTextColor={C.faint} style={styles.searchInput} />
+        <TextInput autoFocus value={q} onChangeText={setQ} placeholder="Cerca titoli, generi…" placeholderTextColor={C.faint}
+          autoCapitalize="none" autoCorrect={false} style={styles.searchInput} />
       </View>
-      <FlatList
-        data={res} keyExtractor={(i: any) => i.id} numColumns={3}
-        contentContainerStyle={styles.grid} columnWrapperStyle={styles.gridRow}
+      <FlatList data={res} keyExtractor={(i: any) => i.id} numColumns={3} contentContainerStyle={styles.grid}
         renderItem={({ item }) => (
           <View style={styles.gridItem}>
-            <MediaCard item={item} fluid onPress={() => navigation.navigate("Detail", { itemId: item.id })} />
+            <MediaCard item={item} width="100%" onPress={() => navigation.navigate("Detail", { itemId: item.id })} />
             <Text numberOfLines={1} style={styles.gridTitle}>{item.title}</Text>
           </View>
         )}
-        ListEmptyComponent={<View style={styles.center}><Ionicons name="search" size={48} color={C.faint} /><Text style={styles.emptyTitle}>Cerca nella libreria</Text></View>}
-      />
+        ListEmptyComponent={<View style={styles.center}><Ionicons name="search" size={48} color={C.faint} /><Text style={styles.emptyTitle}>Cerca nella libreria</Text></View>} />
     </SafeAreaView>
   );
 }
@@ -735,67 +585,61 @@ function DetailScreen({ route, navigation }: any) {
 
   if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
 
-  const currentSeason = seasons.find((s: any) => s.n === season) || seasons[0];
+  const cur = seasons.find((s: any) => s.n === season) || seasons[0];
   const ep = item.type === "series" ? targetEpisode(seasons, progress) : null;
   const resume = ep ? progress[ep.id]?.position || 0 : progress[item.id]?.position || 0;
-  const similar = items.filter((x: any) => x.id !== item.id && x.genres.some((g: string) => item.genres.includes(g))).slice(0, 9);
+  const similar = items.filter((x: any) => x.id !== item.id && x.genres.some((g: string) => item.genres.includes(g))).slice(0, 8);
+  const inList = list.includes(item.id);
 
   return (
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
       <View style={styles.detailHero}>
-        {item.backdrop
-          ? <ImageBackground source={{ uri: item.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+        {item.backdrop ? <ImageBackground source={{ uri: item.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
           : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + item.hue + ",55%,22%)" }]} />}
         <LinearGradient colors={["rgba(8,8,11,0.2)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
-        <SafeAreaView style={styles.detailHeroContent} edges={["top"]}>
+        <SafeAreaView style={styles.detailHeroContent}>
           <IconButton name="arrow-back" onPress={() => navigation.goBack()} />
           <Text style={styles.detailTitle}>{item.title}</Text>
           <View style={styles.metaRow}>
             <Text style={styles.match}>{item.match}% compatibile</Text>
             <Text style={styles.metaText}>{item.year}</Text>
-            <Text style={styles.badge}>HD</Text>
             <Text style={styles.badge}>{item.rating}</Text>
           </View>
           <Text numberOfLines={4} style={styles.heroDesc}>{item.overview}</Text>
           <View style={styles.actions}>
             <Pressable onPress={() => navigation.navigate("Player", { itemId: item.id, episode: ep })} style={styles.whiteButton}>
-              <Ionicons name="play" size={22} color="#000" />
-              <Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text>
+              <Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text>
             </Pressable>
-            <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, list.includes(item.id) && styles.roundOn]}>
-              <Ionicons name={list.includes(item.id) ? "checkmark" : "add"} size={24} color={list.includes(item.id) ? C.green : "#fff"} />
+            <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, inList && styles.roundOn]}>
+              <Ionicons name={inList ? "checkmark" : "add"} size={26} color={inList ? C.green : "#fff"} />
             </Pressable>
           </View>
+          {inList && <Text style={styles.inListNote}>Nella tua lista</Text>}
         </SafeAreaView>
       </View>
 
       <View style={styles.detailBody}>
-        <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{item.cast.join(", ") || "-"}</Text>
-        <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{item.genres.join(", ") || "-"}</Text>
+        <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{item.cast.join(", ") || "–"}</Text>
+        <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{item.genres.join(", ") || "–"}</Text>
 
         {item.type === "series" && (
           <>
-            <View style={styles.seasonHeader}>
-              <Text style={styles.sectionTitle}>Episodi</Text>
-              {loading && <ActivityIndicator color={C.red} />}
-            </View>
+            <View style={styles.seasonHeader}><Text style={styles.sectionTitle}>Episodi</Text>{loading && <ActivityIndicator color={C.red} />}</View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
               {seasons.map((s: any) => (
-                <Pressable key={s.n} onPress={() => setSeason(s.n)} style={[styles.seasonChip, currentSeason?.n === s.n && styles.seasonChipOn]}>
-                  <Text style={[styles.seasonText, currentSeason?.n === s.n && styles.seasonTextOn]}>{s.name}</Text>
+                <Pressable key={s.n} onPress={() => setSeason(s.n)} style={[styles.seasonChip, cur?.n === s.n && styles.seasonChipOn]}>
+                  <Text style={[styles.seasonText, cur?.n === s.n && styles.seasonTextOn]}>{s.name}</Text>
                 </Pressable>
               ))}
             </ScrollView>
-            {(currentSeason?.episodes || []).map((e: any) => {
+            {(cur?.episodes || []).map((e: any) => {
               const p = progress[e.id];
               const pct = p && p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0;
               return (
                 <Pressable key={e.id} onPress={() => navigation.navigate("Player", { itemId: item.id, episode: e })} style={styles.episode}>
                   <Text style={styles.episodeNum}>{e.episode}</Text>
                   <View style={styles.episodeThumb}>
-                    {e.thumb
-                      ? <Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-                      : <View style={[StyleSheet.absoluteFill, { backgroundColor: C.surface3 }]} />}
+                    <Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} onError={() => {}} />
                     {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
                   </View>
                   <View style={{ flex: 1 }}>
@@ -815,8 +659,7 @@ function DetailScreen({ route, navigation }: any) {
             <View style={styles.similarGrid}>
               {similar.map((x: any) => (
                 <View key={x.id} style={styles.similarItem}>
-                  <MediaCard item={x} fluid onPress={() => navigation.navigate("Detail", { itemId: x.id })} />
-                  <Text numberOfLines={1} style={styles.gridTitle}>{x.title}</Text>
+                  <MediaCard item={x} width="100%" onPress={() => navigation.navigate("Detail", { itemId: x.id })} />
                 </View>
               ))}
             </View>
@@ -827,9 +670,40 @@ function DetailScreen({ route, navigation }: any) {
   );
 }
 
+function MenuItem({ label, value, selected, onPress }: any) {
+  return (
+    <Pressable onPress={onPress} style={styles.menuItem}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
+    </Pressable>
+  );
+}
+
+function MenuToggle({ label, value, onToggle }: any) {
+  return (
+    <Pressable onPress={onToggle} style={styles.menuItem}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
+    </Pressable>
+  );
+}
+
+function MenuHeader({ title, onBack, onClose }: any) {
+  return (
+    <View style={styles.menuHeader}>
+      <IconButton name="chevron-back" size={20} onPress={onBack} />
+      <Text style={styles.menuHeaderText}>{title}</Text>
+      <View style={{ flex: 1 }} />
+      <IconButton name="close" size={20} onPress={onClose} />
+    </View>
+  );
+}
+
 function PlayerScreen({ route, navigation }: any) {
   const { session, items, settings, setSettings, saveProgress } = useApp();
+  const dim = useWindowDimensions();
   const item = items.find((x: any) => x.id === route.params.itemId);
+
   const [episode, setEpisode] = useState<any>(route.params.episode || null);
   const [info, setInfo] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -845,46 +719,35 @@ function PlayerScreen({ route, navigation }: any) {
   const [nextEp, setNextEp] = useState<any>(null);
   const [countdown, setCountdown] = useState(8);
   const [landscape, setLandscape] = useState(false);
+
   const videoRef = useRef<any>(null);
   const pendingSeek = useRef<number | null>(null);
+  const resumeRef = useRef(0);
+  const seekLock = useRef(0);
+  const scrubbingRef = useRef(false);
+  const finishedRef = useRef(false);
   const retried = useRef(false);
   const lastSave = useRef(0);
   const positionRef = useRef(0);
   const infoRef = useRef<any>(null);
 
-  useEffect(() => {
-    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: false });
-    ScreenOrientation.unlockAsync().catch(() => {});
-    return () => { ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {}); };
-  }, []);
+  const source = useMemo(() => (info?.url ? { uri: info.url } : undefined), [info?.url]);
 
+  useEffect(() => { Audio.setAudioModeAsync({ playsInSilentModeIOS: true }); }, []);
   useEffect(() => { infoRef.current = info; }, [info]);
   useEffect(() => { positionRef.current = position; }, [position]);
-
-  async function toggleRotate() {
-    try {
-      if (landscape) {
-        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-        setLandscape(false);
-      } else {
-        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-        setLandscape(true);
-      }
-    } catch {}
-  }
+  useEffect(() => () => { ScreenOrientation.unlockAsync().catch(() => {}); }, []);
 
   async function load(opts: any = {}, epArg = episode) {
     if (!item) return;
     setLoading(true); setError("");
     try {
-      const mediaId = epArg ? epArg.id : item.id;
-      const inf = await getPlayback(session, mediaId, settings, {
+      const inf = await getPlayback(session, epArg ? epArg.id : item.id, settings, {
         ...opts, demoUrl: epArg?.video || item.video, duration: epArg?.duration || item.duration
       });
       setInfo(inf);
       setDuration(inf.duration || epArg?.duration || item.duration || 0);
-    } catch (e: any) { setError(e.message || "Errore di riproduzione."); }
-    finally { setLoading(false); }
+    } catch (e: any) { setError(e.message || "Errore di riproduzione."); } finally { setLoading(false); }
   }
 
   useEffect(() => {
@@ -892,10 +755,12 @@ function PlayerScreen({ route, navigation }: any) {
     (async () => {
       let ep = episode;
       if (item.type === "series" && !ep) {
-        const seasons = await loadSeasons(session, item);
-        ep = targetEpisode(seasons, {});
+        const ss = await loadSeasons(session, item);
+        ep = targetEpisode(ss, {});
         setEpisode(ep);
       }
+      const id = ep ? ep.id : item.id;
+      resumeRef.current = route.params.resume ?? 0;
       await load({}, ep);
     })();
     return () => { if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true); };
@@ -909,21 +774,23 @@ function PlayerScreen({ route, navigation }: any) {
   }, [info?.url]);
 
   useEffect(() => {
-    if (!controls || !playing) return;
-    const t = setTimeout(() => setControls(false), 3500);
+    if (!controls || !playing || menu) return;
+    const t = setTimeout(() => setControls(false), 4000);
     return () => clearTimeout(t);
-  }, [controls, playing]);
+  }, [controls, playing, menu]);
 
   useEffect(() => {
     if (!ended || !nextEp || !settings.autoplay) return;
     setCountdown(8);
-    const t = setInterval(() => {
-      setCountdown(c => { if (c <= 1) { clearInterval(t); playEpisode(nextEp); return 0; } return c - 1; });
-    }, 1000);
+    const t = setInterval(() => setCountdown(c => { if (c <= 1) { clearInterval(t); playEpisode(nextEp); return 0; } return c - 1; }), 1000);
     return () => clearInterval(t);
   }, [ended, nextEp]);
 
-  async function reload(opts: any) { pendingSeek.current = position; await load(opts, episode); }
+  async function reload(opts: any) {
+    pendingSeek.current = positionRef.current;
+    finishedRef.current = false;
+    await load(opts, episode);
+  }
 
   async function togglePlay() {
     if (!videoRef.current) return;
@@ -931,54 +798,74 @@ function PlayerScreen({ route, navigation }: any) {
     setControls(true);
   }
 
-  async function onStatus(status: any) {
-    if (!status) return;
-    if (status.isLoaded) {
-      const pos = (status.positionMillis || 0) / 1000;
-      const dur = (status.durationMillis || 0) / 1000 || duration;
-      setPosition(pos); setDuration(dur); setPlaying(!!status.isPlaying);
-      if (pendingSeek.current != null) {
-        const t = pendingSeek.current; pendingSeek.current = null;
-        videoRef.current?.setPositionAsync(t);
+  async function rotate() {
+    try {
+      if (landscape) { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); setLandscape(false); }
+      else { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT); setLandscape(true); }
+    } catch {}
+    setControls(true);
+  }
+
+  async function onStatus(st: any) {
+    if (!st) return;
+    if (st.isLoaded) {
+      const dur = (st.durationMillis || 0) / 1000;
+      if (dur > 0) setDuration(dur);
+      setPlaying(!!st.isPlaying);
+      const locked = scrubbingRef.current || Date.now() < seekLock.current;
+      if (!locked && !st.isBuffering) {
+        const pos = (st.positionMillis || 0) / 1000;
+        setPosition(pos); positionRef.current = pos;
+        const id = episode ? episode.id : item.id;
+        if (Date.now() - lastSave.current > 6000 && dur > 0) { lastSave.current = Date.now(); saveProgress(id, pos, dur); }
       }
-      const id = episode ? episode.id : item.id;
-      if (Date.now() - lastSave.current > 5000 && dur > 0) { lastSave.current = Date.now(); saveProgress(id, pos, dur); }
-      if (status.didJustFinish) {
+      if (st.didJustFinish && !finishedRef.current) {
+        finishedRef.current = true;
+        const id = episode ? episode.id : item.id;
         saveProgress(id, dur, dur);
-        if (settings.loop) { videoRef.current?.setPositionAsync(0); videoRef.current?.playAsync(); }
+        if (settings.loop) { finishedRef.current = false; videoRef.current?.setPositionAsync(0); videoRef.current?.playAsync(); }
         else {
-          let next = null;
-          if (item.type === "series" && episode) {
-            const seasons = await loadSeasons(session, item);
-            next = findNextEpisode(seasons, episode);
-          }
-          setNextEp(next); setEnded(true);
+          let nx = null;
+          if (item.type === "series" && episode) { const ss = await loadSeasons(session, item); nx = findNextEpisode(ss, episode); }
+          setNextEp(nx); setEnded(true);
         }
       }
     }
-    if (status.error) {
+    if (st.error) {
       if (!retried.current && info?.method === "DirectPlay") { retried.current = true; reload({ force: true }); }
-      else setError(String(status.error));
+      else setError(String(st.error));
     }
   }
 
+  async function onLoad() {
+    try {
+      if (pendingSeek.current != null) { const t = pendingSeek.current; pendingSeek.current = null; await videoRef.current?.setPositionAsync(t); }
+      else if (resumeRef.current > 0) { await videoRef.current?.setPositionAsync(resumeRef.current); }
+      resumeRef.current = 0;
+      await videoRef.current?.playAsync();
+    } catch {}
+  }
+
   function playEpisode(ep: any) {
-    setEnded(false); setNextEp(null); setEpisode(ep); setInfo(null); setPosition(0); load({}, ep);
+    setEnded(false); setNextEp(null); setEpisode(ep); setInfo(null);
+    setPosition(0); positionRef.current = 0; finishedRef.current = false;
+    load({}, ep);
   }
 
   if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
 
   const title = episode ? episode.title : item.title;
-  const subtitle = episode ? item.title + " " + DOT + " S" + episode.season + ":E" + episode.episode : item.year + " " + DOT + " " + item.genres.join(", ");
+  const subtitle = episode ? item.title + " · S" + episode.season + ":E" + episode.episode : item.year + " · " + item.genres.join(", ");
+  const menuW = Math.min(400, dim.width - 32);
+  const menuH = Math.min(dim.height * 0.82, 560);
 
   return (
     <View style={styles.playerRoot}>
       <StatusBar hidden />
-      {info?.url ? (
-        <Video ref={videoRef} source={{ uri: info.url }} style={StyleSheet.absoluteFill}
-          resizeMode={ResizeMode.CONTAIN} shouldPlay rate={settings.speed}
-          useNativeControls={false} onPlaybackStatusUpdate={onStatus} />
-      ) : null}
+      {source && (
+        <Video ref={videoRef} source={source} style={StyleSheet.absoluteFill} resizeMode={ResizeMode.CONTAIN}
+          rate={settings.speed} useNativeControls={false} onLoad={onLoad} onPlaybackStatusUpdate={onStatus} />
+      )}
 
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setControls(v => !v)} />
 
@@ -989,52 +876,54 @@ function PlayerScreen({ route, navigation }: any) {
           <Ionicons name="warning-outline" size={48} color={C.amber} />
           <Text style={styles.emptyTitle}>Video non caricabile</Text>
           <Text style={styles.muted}>{error}</Text>
-          <Pressable onPress={() => reload({ force: true })} style={styles.primaryButton}>
-            <Text style={styles.primaryButtonText}>Riprova in transcoding</Text>
-          </Pressable>
-          <Pressable onPress={() => navigation.goBack()} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>Chiudi</Text>
-          </Pressable>
+          <Pressable onPress={() => reload({ force: true })} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Riprova in transcoding</Text></Pressable>
+          <Pressable onPress={() => navigation.goBack()} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
         </View>
       )}
 
       {controls && !ended && !error && (
         <>
-          <LinearGradient colors={["rgba(0,0,0,0.75)", "transparent"]} style={styles.playerTopScrim} />
+          <LinearGradient colors={["rgba(0,0,0,0.75)", "transparent"]} style={styles.playerTopScrim} pointerEvents="none" />
           <View style={styles.playerTop}>
             <IconButton name="arrow-back" size={26} onPress={() => navigation.goBack()} />
             <View style={{ flex: 1 }}>
               <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text>
               <Text numberOfLines={1} style={styles.playerSub}>{subtitle}</Text>
             </View>
-            <IconButton name={landscape ? "phone-portrait-outline" : "phone-landscape-outline"} size={24} onPress={toggleRotate} />
+            <IconButton name="sync-outline" size={24} onPress={rotate} />
           </View>
 
-          <Pressable onPress={togglePlay} style={styles.centerPlay}>
-            <Ionicons name={playing ? "pause" : "play"} size={44} color="#fff" />
+          <Pressable onPress={togglePlay} style={styles.centerPlay} hitSlop={30}>
+            <Ionicons name={playing ? "pause" : "play"} size={62} color="#fff" style={styles.centerIcon} />
           </Pressable>
 
-          <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.playerBottomScrim} />
+          <LinearGradient colors={["transparent", "rgba(0,0,0,0.85)"]} style={styles.playerBottomScrim} pointerEvents="none" />
           <View style={styles.playerBottom}>
-            <Slider
-              style={{ width: "100%", height: 34 }} minimumValue={0} maximumValue={Math.max(1, duration)}
+            <Slider style={{ width: "100%", height: 34 }} minimumValue={0} maximumValue={Math.max(1, duration)}
               value={scrubbing ? scrub : position} minimumTrackTintColor={C.red}
               maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
-              onSlidingStart={() => setScrubbing(true)} onValueChange={setScrub}
-              onSlidingComplete={async v => { setScrubbing(false); setPosition(v); await videoRef.current?.setPositionAsync(v); }}
-            />
+              onSlidingStart={() => { scrubbingRef.current = true; setScrubbing(true); setScrub(positionRef.current); }}
+              onValueChange={setScrub}
+              onSlidingComplete={async v => {
+                seekLock.current = Date.now() + 1500;
+                try { await videoRef.current?.setPositionAsync(v); } catch {}
+                setPosition(v); positionRef.current = v;
+                finishedRef.current = false;
+                scrubbingRef.current = false; setScrubbing(false);
+              }} />
             <View style={styles.playerControls}>
               <Text style={styles.playerTime}>{fmt(scrubbing ? scrub : position)} <Text style={styles.faint}>/ {fmt(duration)}</Text></Text>
               <View style={{ flex: 1 }} />
               <IconButton name="musical-notes-outline" onPress={() => setMenu("audio")} />
               <IconButton name="chatbox-ellipses-outline" onPress={() => setMenu("subs")} />
               <Pressable onPress={() => setMenu("quality")} style={styles.hdButton}>
-                <Text style={styles.hdText}>{info?.quality && info.quality !== "auto" ? info.quality + "p" : "HD"}</Text>
+                <View style={styles.hdBox}>
+                  <Text style={styles.hdText}>{info?.quality && info.quality !== "auto" ? info.quality + "p" : "HD"}</Text>
+                </View>
               </Pressable>
-              <IconButton name={landscape ? "phone-portrait-outline" : "phone-landscape-outline"} onPress={toggleRotate} />
               <IconButton name="settings-outline" onPress={() => setMenu("root")} />
             </View>
-            {settings.stats && info && <Text style={styles.statsText}>{info.method} {DOT} {info.quality} {DOT} {info.reason}</Text>}
+            {settings.stats && info && <Text style={styles.statsText}>{info.method} · {info.quality} · {info.reason}</Text>}
           </View>
         </>
       )}
@@ -1047,30 +936,24 @@ function PlayerScreen({ route, navigation }: any) {
               <Pressable onPress={() => playEpisode(nextEp)} style={styles.nextCard}>
                 <View style={styles.nextThumb} />
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.episodeTitle}>S{nextEp.season}:E{nextEp.episode} {DOT} {nextEp.title}</Text>
+                  <Text style={styles.episodeTitle}>S{nextEp.season}:E{nextEp.episode} · {nextEp.title}</Text>
                   <Text style={styles.muted}>{item.title}</Text>
                 </View>
                 {settings.autoplay && <Text style={styles.countdown}>{countdown}</Text>}
               </Pressable>
               <View style={styles.actions}>
-                <Pressable onPress={() => playEpisode(nextEp)} style={styles.whiteButton}>
-                  <Ionicons name="play" size={20} color="#000" /><Text style={styles.whiteButtonText}>Guarda subito</Text>
-                </Pressable>
-                <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}>
-                  <Text style={styles.ghostButtonText}>Chiudi</Text>
-                </Pressable>
+                <Pressable onPress={() => playEpisode(nextEp)} style={styles.whiteButton}><Ionicons name="play" size={20} color="#000" /><Text style={styles.whiteButtonText}>Guarda subito</Text></Pressable>
+                <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
               </View>
             </>
           ) : (
             <>
               <Text style={styles.endLabel}>Fine</Text>
               <View style={styles.actions}>
-                <Pressable onPress={() => { setEnded(false); videoRef.current?.setPositionAsync(0); videoRef.current?.playAsync(); }} style={styles.whiteButton}>
+                <Pressable onPress={() => { setEnded(false); finishedRef.current = false; videoRef.current?.setPositionAsync(0); videoRef.current?.playAsync(); }} style={styles.whiteButton}>
                   <Ionicons name="refresh" size={20} color="#000" /><Text style={styles.whiteButtonText}>Riguarda</Text>
                 </Pressable>
-                <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}>
-                  <Text style={styles.ghostButtonText}>Chiudi</Text>
-                </Pressable>
+                <Pressable onPress={() => navigation.goBack()} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
               </View>
             </>
           )}
@@ -1079,85 +962,61 @@ function PlayerScreen({ route, navigation }: any) {
 
       <Modal visible={!!menu} transparent animationType="fade" onRequestClose={() => setMenu(null)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setMenu(null)}>
-          <Pressable style={styles.menu}>
-            {menu === "root" && (
-              <>
-                <MenuItem label="Velocita" value={settings.speed === 1 ? "Normale" : settings.speed + MULT} onPress={() => setMenu("speed")} />
-                <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
-                <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
-                <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
-                <MenuItem label="Ruota schermo" onPress={toggleRotate} />
-                <MenuItem label="Impostazioni complete" onPress={() => navigation.replace("Settings")} />
-              </>
-            )}
-            {menu === "speed" && (
-              <>
-                <MenuHeader title="Velocita" onBack={() => setMenu("root")} />
-                {[0.5, 0.75, 1, 1.25, 1.5, 2].map(s => (
-                  <MenuItem key={s} label={s === 1 ? "Normale" : s + MULT} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />
-                ))}
-              </>
-            )}
-            {menu === "quality" && (
-              <>
-                <MenuHeader title="Qualita" onBack={() => setMenu("root")} />
-                {["auto", "2160", "1080", "720", "480", "360"].map(q => (
-                  <MenuItem key={q} label={q === "auto" ? "Automatica" : q + "p"} selected={String(info?.quality) === q}
-                    onPress={() => { setMenu(null); reload({ quality: q, force: q !== "auto" }); }} />
-                ))}
-              </>
-            )}
-            {menu === "audio" && (
-              <>
-                <MenuHeader title="Audio" onBack={() => setMenu("root")} />
-                {(info?.audio || []).map((a: any) => (
-                  <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio"} selected={info?.audioIndex === a.Index}
-                    onPress={() => { setMenu(null); reload({ audioIndex: a.Index, force: true }); }} />
-                ))}
-              </>
-            )}
-            {menu === "subs" && (
-              <>
-                <MenuHeader title="Sottotitoli" onBack={() => setMenu("root")} />
-                <MenuItem label="Disattivati" selected={!info?.subtitleIndex}
-                  onPress={() => { setMenu(null); reload({ subtitleIndex: -1, force: true }); }} />
-                {(info?.subs || []).map((s: any) => (
-                  <MenuItem key={s.Index} label={s.DisplayTitle || s.Language || "Sottotitoli"} selected={info?.subtitleIndex === s.Index}
-                    onPress={() => { setMenu(null); reload({ subtitleIndex: s.Index, force: true }); }} />
-                ))}
-                <Text style={styles.menuNote}>I sottotitoli vengono masterizzati dal server quando necessario.</Text>
-              </>
-            )}
+          <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
+            <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
+              {menu === "root" && (
+                <>
+                  <MenuHeader title="Impostazioni player" onBack={() => setMenu(null)} onClose={() => setMenu(null)} />
+                  <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => setMenu("speed")} />
+                  <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
+                  <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
+                  <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
+                  <MenuItem label="Ruota schermo" value={landscape ? "Orizzontale" : "Verticale"} onPress={rotate} />
+                  <MenuItem label="Impostazioni complete" onPress={() => navigation.replace("Settings")} />
+                </>
+              )}
+              {menu === "speed" && (
+                <>
+                  <MenuHeader title="Velocità" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
+                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => (
+                    <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />
+                  ))}
+                </>
+              )}
+              {menu === "quality" && (
+                <>
+                  <MenuHeader title="Qualità" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
+                  {["auto", "2160", "1080", "720", "480", "360"].map(q => (
+                    <MenuItem key={q} label={q === "auto" ? "Automatica" : q + "p"} selected={String(info?.quality) === q}
+                      onPress={() => { setMenu(null); reload({ quality: q, force: q !== "auto" }); }} />
+                  ))}
+                </>
+              )}
+              {menu === "audio" && (
+                <>
+                  <MenuHeader title="Audio" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
+                  {(info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia audio alternativa.</Text>}
+                  {(info?.audio || []).map((a: any) => (
+                    <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio"} selected={info?.audioIndex === a.Index}
+                      onPress={() => { setMenu(null); reload({ audioIndex: a.Index, force: true }); }} />
+                  ))}
+                </>
+              )}
+              {menu === "subs" && (
+                <>
+                  <MenuHeader title="Sottotitoli" onBack={() => setMenu("root")} onClose={() => setMenu(null)} />
+                  <MenuItem label="Disattivati" selected={info?.subtitleIndex == null} onPress={() => { setMenu(null); reload({ subtitleIndex: -1, force: true }); }} />
+                  {(info?.subs || []).map((s: any) => (
+                    <MenuItem key={s.Index} label={s.DisplayTitle || s.Language || "Sottotitoli"} selected={info?.subtitleIndex === s.Index}
+                      onPress={() => { setMenu(null); reload({ subtitleIndex: s.Index, force: true }); }} />
+                  ))}
+                  <Text style={styles.menuNote}>I sottotitoli vengono masterizzati dal server: la selezione ricarica lo stream mantenendo la posizione.</Text>
+                </>
+              )}
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
-    </View>
-  );
-}
-
-function MenuItem({ label, value, selected, onPress }: any) {
-  return (
-    <Pressable onPress={onPress} style={styles.menuItem}>
-      <Text style={styles.menuItemText}>{label}</Text>
-      <Text style={styles.menuValue}>{selected ? "OK" : value || ""}</Text>
-    </Pressable>
-  );
-}
-
-function MenuToggle({ label, value, onToggle }: any) {
-  return (
-    <Pressable onPress={onToggle} style={styles.menuItem}>
-      <Text style={styles.menuItemText}>{label}</Text>
-      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
-    </Pressable>
-  );
-}
-
-function MenuHeader({ title, onBack }: any) {
-  return (
-    <View style={styles.menuHeader}>
-      <IconButton name="chevron-back" size={20} onPress={onBack} />
-      <Text style={styles.menuHeaderText}>{title}</Text>
     </View>
   );
 }
@@ -1188,66 +1047,54 @@ function Toggle({ label, value, onToggle }: any) {
 
 function SettingsScreen({ navigation }: any) {
   const { session, settings, setSettings, reloadLibrary, resetLocal, setSession } = useApp();
+  const dim = useWindowDimensions();
+  const twoCol = dim.width > 700;
 
   async function doTest() {
-    if (session.mode === "demo") { Alert.alert("Demo", "Sei in modalita demo."); return; }
-    try { const r = await testServer(session.server); Alert.alert("Server OK", r.name + " " + DOT + " v" + r.version); }
+    if (session.mode === "demo") return Alert.alert("Demo", "Sei in modalità demo.");
+    try { const r = await testServer(session.server); Alert.alert("Server OK", r.name + " · v" + r.version); }
     catch (e: any) { Alert.alert("Test fallito", e.message); }
   }
 
   return (
-    <SafeAreaView style={styles.screen} edges={["top"]}>
+    <SafeAreaView style={styles.screen}>
       <View style={styles.searchHeader}>
         <IconButton name="arrow-back" onPress={() => navigation.goBack()} />
         <Text style={styles.pageTitle}>Impostazioni</Text>
       </View>
-      <ScrollView contentContainerStyle={styles.settingsScroll}>
-        <View style={styles.settingsCard}>
-          <Text style={styles.sectionTitle}>Aspetto</Text>
-          <Choice
-            label="Continua a guardare"
-            value={settings.continueStyle}
-            options={[["wide", "Rettangolari 16:9"], ["poster", "Locandina verticale"]]}
-            onChange={(v: string) => setSettings({ ...settings, continueStyle: v })}
-          />
-          <Text style={styles.settingLabel}>Dimensione locandine: {settings.posterSize}px</Text>
-          <Slider minimumValue={120} maximumValue={220} step={5} value={settings.posterSize}
-            minimumTrackTintColor={C.red} maximumTrackTintColor={C.surface3} thumbTintColor={C.red}
-            onValueChange={v => setSettings({ ...settings, posterSize: v })} />
-          <Toggle label="Barre di progresso" value={settings.progressBars} onToggle={() => setSettings({ ...settings, progressBars: !settings.progressBars })} />
-        </View>
-
-        <View style={styles.settingsCard}>
+      <ScrollView contentContainerStyle={[styles.settingsScroll, twoCol && styles.settingsScrollWide]} keyboardShouldPersistTaps="handled">
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Riproduzione</Text>
-          <Choice label="Modalita streaming" value={settings.streamMode}
-            options={[["auto", "Auto"], ["direct", "Direct Play"], ["transcode", "Transcoding"]]}
-            onChange={(v: string) => setSettings({ ...settings, streamMode: v })} />
-          <Choice label="Qualita massima" value={settings.quality}
-            options={[["auto", "Auto"], ["2160", "4K"], ["1080", "1080p"], ["720", "720p"], ["480", "480p"]]}
-            onChange={(v: string) => setSettings({ ...settings, quality: v })} />
+          <Choice label="Modalità streaming" value={settings.streamMode} options={[["auto", "Auto"], ["direct", "Direct Play"], ["transcode", "Transcoding"]]} onChange={(v: string) => setSettings({ ...settings, streamMode: v })} />
+          <Choice label="Qualità massima" value={settings.quality} options={[["auto", "Auto"], ["2160", "4K"], ["1080", "1080p"], ["720", "720p"], ["480", "480p"]]} onChange={(v: string) => setSettings({ ...settings, quality: v })} />
           <Toggle label="Risparmio dati" value={settings.saveData} onToggle={() => setSettings({ ...settings, saveData: !settings.saveData })} />
           <Toggle label="Prossimo episodio automatico" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
           <Toggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
-          <Choice label="Velocita" value={settings.speed}
-            options={[[0.5, "0.5x"], [0.75, "0.75x"], [1, "1x"], [1.25, "1.25x"], [1.5, "1.5x"], [2, "2x"]]}
-            onChange={(v: number) => setSettings({ ...settings, speed: v })} />
+          <Choice label="Velocità" value={settings.speed} options={[[0.5, "0.5×"], [0.75, "0.75×"], [1, "1×"], [1.25, "1.25×"], [1.5, "1.5×"], [2, "2×"]]} onChange={(v: number) => setSettings({ ...settings, speed: v })} />
         </View>
 
-        <View style={styles.settingsCard}>
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Audio e sottotitoli</Text>
-          <Choice label="Lingua audio" value={settings.audioLang}
-            options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]}
-            onChange={(v: string) => setSettings({ ...settings, audioLang: v })} />
-          <Choice label="Lingua sottotitoli" value={settings.subLang}
-            options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]}
-            onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
+          <Choice label="Lingua audio" value={settings.audioLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, audioLang: v })} />
+          <Choice label="Lingua sottotitoli" value={settings.subLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
           <Toggle label="Sottotitoli automatici" value={settings.autoSub} onToggle={() => setSettings({ ...settings, autoSub: !settings.autoSub })} />
           <Toggle label="Statistiche riproduzione" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
         </View>
 
-        <View style={styles.settingsCard}>
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
+          <Text style={styles.sectionTitle}>Interfaccia</Text>
+          <Text style={styles.settingLabel}>Dimensione locandine: {settings.posterSize}px</Text>
+          <Slider minimumValue={120} maximumValue={220} step={5} value={settings.posterSize}
+            minimumTrackTintColor={C.red} maximumTrackTintColor={C.surface3} thumbTintColor={C.red}
+            onValueChange={v => setSettings({ ...settings, posterSize: v })} />
+          <Toggle label="Locandine orizzontali (Continua / Prossimi)" value={settings.thumbWide} onToggle={() => setSettings({ ...settings, thumbWide: !settings.thumbWide })} />
+          <Toggle label="Animazioni" value={settings.animations} onToggle={() => setSettings({ ...settings, animations: !settings.animations })} />
+          <Toggle label="Barre di progresso" value={settings.progressBars} onToggle={() => setSettings({ ...settings, progressBars: !settings.progressBars })} />
+        </View>
+
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Server</Text>
-          <Text style={styles.muted}>{session.mode === "demo" ? "Modalita demo" : session.server}</Text>
+          <Text style={styles.muted}>{session.mode === "demo" ? "Modalità demo" : session.server}</Text>
           <View style={styles.settingsActions}>
             <Pressable onPress={reloadLibrary} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Ricarica libreria</Text></Pressable>
             <Pressable onPress={doTest} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Test server</Text></Pressable>
@@ -1270,6 +1117,7 @@ export default function App() {
   const [progress, setProgress] = useState<any>({});
   const [list, setList] = useState<string[]>([]);
   const [settings, setSettings] = useState<any>(defaultSettings);
+  const [featured, setFeatured] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -1295,12 +1143,7 @@ export default function App() {
     if (s) await SecureStore.setItemAsync("nova.session", JSON.stringify(s));
     else await SecureStore.deleteItemAsync("nova.session");
     setSessionState(s);
-    if (!s) { setItems([]); setEpMap({}); setNextUp([]); }
-  }
-
-  async function switchUser(name: string) {
-    await AsyncStorage.setItem("nova.lastUser", name);
-    await setSession(null);
+    if (!s) { setItems([]); setEpMap({}); setNextUp([]); setFeatured(null); }
   }
 
   async function reloadLibrary() {
@@ -1310,46 +1153,31 @@ export default function App() {
       const data = session.mode === "demo" ? demoLibrary() : await loadLibrary(session);
       setItems(data.items); setEpMap(data.epMap || {}); setNextUp(data.nextUp || []);
       setProgress((p: any) => ({ ...data.progress, ...p }));
-    } catch (e: any) {
-      Alert.alert("Errore libreria", e.message);
-      await setSession(null);
-    } finally { setLibLoading(false); }
+      setFeatured(pickFeatured(data.items, { ...data.progress, ...progress }, data.epMap || {}, list));
+    } catch (e: any) { Alert.alert("Errore libreria", e.message); await setSession(null); }
+    finally { setLibLoading(false); }
   }
 
   useEffect(() => { if (session) reloadLibrary(); }, [session?.token, session?.mode]);
 
-  function saveProgress(id: string, position: number, duration: number) {
+  const reshuffle = () => setFeatured(pickFeatured(items, progress, epMap, list));
+  const saveProgress = (id: string, position: number, duration: number) =>
     setProgress((p: any) => ({ ...p, [id]: { position, duration, updated: Date.now() } }));
-  }
-
-  function toggleList(id: string) {
-    setList(l => (l.includes(id) ? l.filter(x => x !== id) : [...l, id]));
-  }
+  const toggleList = (id: string) => setList(l => (l.includes(id) ? l.filter(x => x !== id) : [...l, id]));
 
   async function resetLocal() {
     await SecureStore.deleteItemAsync("nova.session");
     const keys = await AsyncStorage.getAllKeys();
     await AsyncStorage.multiRemove(keys.filter(k => k.startsWith("nova.")));
-    setSessionState(null); setItems([]); setEpMap({}); setNextUp([]); setProgress({}); setList([]); setSettings(defaultSettings);
+    setSessionState(null); setItems([]); setEpMap({}); setNextUp([]); setProgress({}); setList([]); setSettings(defaultSettings); setFeatured(null);
   }
 
-  const value = {
-    session, setSession, switchUser, items, epMap, nextUp, progress, saveProgress,
-    list, toggleList, settings, setSettings, libLoading, reloadLibrary, resetLocal
-  };
+  const value = { session, setSession, items, epMap, nextUp, progress, saveProgress, list, toggleList, settings, setSettings, libLoading, reloadLibrary, resetLocal, featured, reshuffle };
 
-  if (booting) {
-    return (
-      <SafeAreaProvider>
-        <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-        <SafeAreaView style={styles.center}><Text style={styles.logo}>NOVA</Text><ActivityIndicator color={C.red} /></SafeAreaView>
-      </SafeAreaProvider>
-    );
-  }
+  if (booting) return <SafeAreaProvider><SafeAreaView style={styles.center}><Text style={styles.logo}>NOVA</Text><ActivityIndicator color={C.red} /></SafeAreaView></SafeAreaProvider>;
 
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} translucent={false} />
       <AppCtx.Provider value={value}>
         {!session ? <LoginScreen /> : (
           <NavigationContainer theme={navTheme}>
@@ -1374,38 +1202,40 @@ const styles = StyleSheet.create({
   faint: { color: C.faint, fontSize: 12 },
   emptyTitle: { color: C.text, fontSize: 20, fontWeight: "800" },
   logo: { fontSize: 56, fontWeight: "900", color: C.red, letterSpacing: 2 },
-  logoSub: { color: C.muted, letterSpacing: 4, textTransform: "uppercase", fontSize: 12, marginTop: -8 },
-  loginRoot: { flex: 1, backgroundColor: C.bg },
-  loginScroll: { padding: 24, gap: 14 },
-  loginTitle: { color: C.text, fontSize: 24, fontWeight: "800", marginBottom: 12 },
+  logoSub: { color: C.muted, letterSpacing: 4, textTransform: "uppercase", fontSize: 12, marginTop: -8, marginBottom: 16 },
+  loginScroll: { padding: 24, gap: 6 },
   loginCard: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 18, padding: 22 },
   loginCardTitle: { color: C.text, fontSize: 24, fontWeight: "800" },
-  loginCardSub: { color: C.muted, fontSize: 13, marginBottom: 18 },
-  label: { color: C.muted, fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6, marginTop: 10 },
+  loginCardSub: { color: C.muted, fontSize: 13, marginBottom: 8 },
+  label: { color: C.muted, fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6, marginTop: 12 },
   input: { backgroundColor: "#0d0d12", borderColor: C.line, borderWidth: 1, borderRadius: 10, color: C.text, paddingHorizontal: 14, paddingVertical: 12 },
+  passWrap: { position: "relative", justifyContent: "center" },
+  eyeButton: { position: "absolute", right: 6, top: 0, bottom: 0, width: 42, alignItems: "center", justifyContent: "center" },
   testButton: { alignSelf: "flex-start", backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 14, paddingVertical: 8, marginTop: 10 },
   testButtonText: { color: C.muted, fontWeight: "700", fontSize: 12 },
   status: { fontSize: 12, marginTop: 8 },
   ok: { color: C.green },
   bad: { color: "#ff6b72", marginTop: 8 },
-  primaryButton: { backgroundColor: C.red, borderRadius: 10, paddingVertical: 13, alignItems: "center", justifyContent: "center", marginTop: 14, paddingHorizontal: 20 },
+  primaryButton: { backgroundColor: C.red, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 20, alignItems: "center", justifyContent: "center", marginTop: 16 },
   primaryButtonText: { color: "#fff", fontWeight: "800", fontSize: 15 },
   secondaryButton: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingVertical: 12, paddingHorizontal: 18, alignItems: "center", justifyContent: "center" },
   secondaryButtonText: { color: C.text, fontWeight: "800" },
-  fixButton: { backgroundColor: "#ffb22412", borderColor: "#ffb22455", borderWidth: 1, borderRadius: 10, paddingVertical: 11, alignItems: "center", justifyContent: "center" },
+  fixButton: { backgroundColor: "#ffb22412", borderColor: "#ffb22455", borderWidth: 1, borderRadius: 10, paddingVertical: 11, alignItems: "center", justifyContent: "center", marginTop: 10 },
   fixButtonText: { color: "#ffd58a", fontWeight: "800", fontSize: 13 },
   divider: { flexDirection: "row", alignItems: "center", gap: 10, marginVertical: 16 },
   dividerLine: { flex: 1, height: 1, backgroundColor: C.line },
   dividerText: { color: C.faint, fontSize: 12 },
-  topBar: { height: 62, paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: C.bg },
+  topBar: { height: 62, paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
   topLogo: { color: C.red, fontSize: 26, fontWeight: "900", letterSpacing: 1 },
   iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
   pressed: { backgroundColor: "#ffffff1c" },
   face: { backgroundColor: C.red, alignItems: "center", justifyContent: "center" },
-  hero: { height: 520, justifyContent: "flex-end" },
-  heroContent: { padding: 20, paddingBottom: 30 },
-  heroKicker: { color: C.muted, fontWeight: "800", letterSpacing: 2, fontSize: 12, marginBottom: 8 },
-  heroTitle: { color: C.text, fontSize: 40, fontWeight: "900", textTransform: "uppercase", marginBottom: 10 },
+  hero: { height: 560, justifyContent: "flex-end" },
+  heroContent: { padding: 20, paddingBottom: 34 },
+  heroKickerRow: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 },
+  heroKicker: { color: C.muted, fontWeight: "800", letterSpacing: 2, fontSize: 12 },
+  shuffleBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: "#ffffff1a", alignItems: "center", justifyContent: "center" },
+  heroTitle: { color: C.text, fontSize: 42, fontWeight: "900", textTransform: "uppercase", marginBottom: 10 },
   metaRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 },
   match: { color: C.green, fontWeight: "800" },
   metaText: { color: C.text, fontWeight: "600" },
@@ -1416,38 +1246,37 @@ const styles = StyleSheet.create({
   whiteButtonText: { color: "#000", fontWeight: "800", fontSize: 15 },
   ghostButton: { backgroundColor: "rgba(110,110,122,0.45)", borderRadius: 8, paddingHorizontal: 18, paddingVertical: 11, flexDirection: "row", alignItems: "center", gap: 8 },
   ghostButtonText: { color: "#fff", fontWeight: "800", fontSize: 15 },
-  rows: { marginTop: -16, paddingBottom: 40 },
+  rows: { marginTop: -20, paddingBottom: 40 },
   row: { marginTop: 22 },
   rowTitle: { color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
   rowContent: { paddingHorizontal: 16 },
   card: {},
-  cardFluid: { width: "100%" },
   cardPressed: { transform: [{ scale: 1.05 }], opacity: 0.9 },
   poster: { borderRadius: 10, overflow: "hidden", backgroundColor: C.surface2, width: "100%" },
-  imageTall: { width: "100%", aspectRatio: 2 / 3 },
-  imageWide: { width: "100%", aspectRatio: 16 / 9 },
-  fallback: { padding: 12, justifyContent: "flex-end" },
-  fallbackTitle: { color: C.text, fontWeight: "900", fontSize: 16 },
-  posterGradient: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: 10, paddingTop: 22, paddingBottom: 10 },
-  posterLabel: { color: "#fff", fontWeight: "800", fontSize: 12.5 },
-  posterSubLabel: { color: "#d2d2d8", fontSize: 11 },
-  epBadge: { position: "absolute", top: 8, left: 8, backgroundColor: "rgba(8,8,11,0.8)", borderRadius: 5, paddingHorizontal: 7, paddingVertical: 3 },
-  epBadgeText: { color: "#fff", fontSize: 11, fontWeight: "800" },
+  posterTall: { aspectRatio: 2 / 3 },
+  posterWide: { aspectRatio: 16 / 9 },
+  posterFallback: { padding: 12, justifyContent: "flex-end" },
+  posterFallbackTitle: { color: C.text, fontWeight: "900", fontSize: 16 },
+  epBadge: { position: "absolute", top: 8, left: 8, backgroundColor: "rgba(8,8,11,0.82)", borderRadius: 5, paddingHorizontal: 7, paddingVertical: 3 },
+  epBadgeText: { color: "#fff", fontWeight: "800", fontSize: 11 },
   progressTrack: { position: "absolute", left: 0, right: 0, bottom: 0, height: 4, backgroundColor: "rgba(255,255,255,0.25)" },
   progressFill: { height: "100%", backgroundColor: C.red },
-  searchHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10, gap: 8 },
+  wideLabel: { position: "absolute", left: 10, right: 10, bottom: 10 },
+  wideLabelTitle: { color: "#fff", fontWeight: "800", fontSize: 13 },
+  wideLabelSub: { color: "#d2d2d8", fontSize: 12 },
+  searchHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingTop: 10, gap: 8 },
   searchInput: { flex: 1, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, color: C.text, paddingHorizontal: 16, paddingVertical: 10 },
-  grid: { padding: 12 },
-  gridRow: { gap: 0 },
-  gridItem: { width: "33.333%", paddingHorizontal: 5, marginBottom: 16 },
+  grid: { padding: 16 },
+  gridItem: { flex: 1 / 3, maxWidth: "33.333%", paddingHorizontal: 5, marginBottom: 18 },
   gridTitle: { color: C.muted, fontSize: 12, marginTop: 6 },
-  detailHero: { minHeight: 540, justifyContent: "flex-end" },
-  detailHeroContent: { padding: 20, paddingBottom: 30 },
-  detailTitle: { color: C.text, fontSize: 38, fontWeight: "900", textTransform: "uppercase", marginTop: 16, marginBottom: 10 },
+  detailHero: { minHeight: 560, justifyContent: "flex-end" },
+  detailHeroContent: { padding: 20, paddingBottom: 34 },
+  detailTitle: { color: C.text, fontSize: 40, fontWeight: "900", textTransform: "uppercase", marginTop: 16, marginBottom: 10 },
   detailBody: { padding: 20, paddingBottom: 60 },
+  inListNote: { color: C.green, fontSize: 12, fontWeight: "700", marginTop: 10 },
   facts: { color: C.muted, fontSize: 13, marginBottom: 8 },
-  sectionTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginTop: 20, marginBottom: 12 },
-  seasonHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
+  sectionTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginTop: 8, marginBottom: 12 },
+  seasonHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
   seasonChip: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 16, paddingVertical: 8, marginRight: 8 },
   seasonChipOn: { backgroundColor: "#fff", borderColor: "#fff" },
   seasonText: { color: C.muted, fontWeight: "800" },
@@ -1457,9 +1286,9 @@ const styles = StyleSheet.create({
   episodeThumb: { width: 130, aspectRatio: 16 / 9, borderRadius: 8, overflow: "hidden", backgroundColor: C.surface3 },
   episodeTitle: { color: C.text, fontWeight: "800", fontSize: 15 },
   episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3 },
-  similarGrid: { flexDirection: "row", flexWrap: "wrap", marginHorizontal: -5 },
-  similarItem: { width: "33.333%", paddingHorizontal: 5, marginBottom: 16 },
-  roundButton: { width: 44, height: 44, borderRadius: 22, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
+  similarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  similarItem: { width: "31%" },
+  roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
   roundOn: { borderColor: C.green },
   playerRoot: { flex: 1, backgroundColor: "#000" },
   playerLoading: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
@@ -1469,40 +1298,39 @@ const styles = StyleSheet.create({
   playerTop: { position: "absolute", top: 12, left: 12, right: 12, flexDirection: "row", alignItems: "center", gap: 10 },
   playerTitle: { color: "#fff", fontWeight: "800", fontSize: 16 },
   playerSub: { color: "#d2d2d8", fontSize: 12 },
-  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -43, marginTop: -43, width: 86, height: 86, borderRadius: 43, backgroundColor: "rgba(8,8,11,0.62)", borderWidth: 1, borderColor: "rgba(255,255,255,0.25)", alignItems: "center", justifyContent: "center" },
+  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -40, marginTop: -40, width: 80, height: 80, alignItems: "center", justifyContent: "center" },
+  centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
   playerBottom: { position: "absolute", left: 12, right: 12, bottom: 8 },
   playerControls: { flexDirection: "row", alignItems: "center", gap: 2 },
   playerTime: { color: "#fff", fontWeight: "700", fontSize: 13 },
-  hdButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
-  hdText: { color: "#fff", fontWeight: "900", fontSize: 11, borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1 },
+  hdButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
+  hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 19, alignItems: "center", justifyContent: "center" },
+  hdText: { color: "#fff", fontWeight: "900", fontSize: 10, lineHeight: 12, textAlign: "center", includeFontPadding: false },
   statsText: { color: "#d6d6de", fontSize: 11, marginTop: 4 },
   endOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.93)", alignItems: "center", justifyContent: "center", padding: 24, gap: 18 },
   endLabel: { color: C.muted, textTransform: "uppercase", letterSpacing: 2, fontWeight: "800", fontSize: 12 },
   nextCard: { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 14, padding: 14, width: "100%" },
   nextThumb: { width: 120, aspectRatio: 16 / 9, borderRadius: 8, backgroundColor: C.surface3 },
   countdown: { color: C.red, fontWeight: "900", fontSize: 22 },
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end", padding: 16 },
-  menu: { backgroundColor: "rgba(16,16,22,0.99)", borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden", maxHeight: "80%" },
-  menuItem: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
-  menuItemText: { color: C.text, fontSize: 14, fontWeight: "600" },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 16 },
+  menu: { backgroundColor: "rgba(16,16,22,0.99)", borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
+  menuItem: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
+  menuItemText: { color: C.text, fontSize: 14, fontWeight: "600", flex: 1, paddingRight: 10 },
   menuValue: { color: C.green, fontWeight: "800" },
-  menuHeader: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.line },
+  menuHeader: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 6, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: C.line },
   menuHeaderText: { color: C.text, fontWeight: "800", fontSize: 15 },
-  menuNote: { color: C.faint, fontSize: 12, padding: 14 },
-  menuSection: { color: C.faint, fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 6 },
-  profileHeader: { flexDirection: "row", alignItems: "center", gap: 14, padding: 16, borderBottomWidth: 1, borderBottomColor: C.line },
-  profileName: { color: C.text, fontSize: 17, fontWeight: "800" },
-  profileServer: { color: C.faint, fontSize: 12, marginTop: 2 },
-  userRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  menuNote: { color: C.faint, fontSize: 12, padding: 14, lineHeight: 17 },
   switch: { width: 40, height: 22, borderRadius: 11, backgroundColor: "#3a3a46", padding: 2 },
   switchOn: { backgroundColor: C.red },
   switchKnob: { width: 18, height: 18, borderRadius: 9, backgroundColor: "#fff" },
   switchKnobOn: { transform: [{ translateX: 18 }] },
   pageTitle: { color: C.text, fontSize: 24, fontWeight: "800" },
   settingsScroll: { padding: 16, paddingBottom: 60, gap: 16 },
+  settingsScrollWide: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start" },
   settingsCard: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, padding: 18 },
+  halfCard: { width: "48%", flexGrow: 1 },
   settingBlock: { marginVertical: 10 },
-  settingLabel: { color: C.text, fontWeight: "700", marginBottom: 8 },
+  settingLabel: { color: C.text, fontWeight: "700", marginBottom: 8, flex: 1, paddingRight: 12 },
   settingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12 },
   choiceWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   choice: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 14, paddingVertical: 8 },
