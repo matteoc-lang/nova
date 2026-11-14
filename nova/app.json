@@ -4,20 +4,23 @@
     "slug": "nova-jellyfin",
     "version": "1.0.0",
     "scheme": "nova",
-    "orientation": "portrait",
+    "orientation": "default",
     "userInterfaceStyle": "dark",
     "assetBundlePatterns": ["**/*"],
-    "androidStatusBar": {
-      "backgroundColor": "#08080b",
-      "barStyle": "light-content",
-      "translucent": false
-    },
     "android": {
       "package": "com.matteo.nova",
-      "versionCode": 2,
+      "versionCode": 1,
       "usesCleartextTraffic": true,
-      "permissions": ["INTERNET"]
+      "permissions": [
+        "INTERNET",
+        "WAKE_LOCK",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
     },
-    "plugins": ["expo-secure-store", "expo-screen-orientation"]
+    "plugins": [
+      "expo-secure-store",
+      ["expo-video", { "supportsBackgroundPlayback": true, "supportsPictureInPicture": true }]
+    ]
   }
 }
