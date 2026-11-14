@@ -1,11 +1,12 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, AppState, FlatList, Image, ImageBackground, Modal,
-  PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput,
-  View, useWindowDimensions
+  ActivityIndicator, Alert, Animated, AppState, FlatList, Image, ImageBackground,
+  Modal, PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text,
+  TextInput, View, useWindowDimensions
 } from "react-native";
 import { useEventListener } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
+import * as NavigationBar from "expo-navigation-bar";
 import { NavigationContainer, DefaultTheme, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -52,7 +53,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.0.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="3.1.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -190,7 +191,7 @@ async function fetchSubtitleText(session: any, itemId: string, mediaSourceId: st
         lastErr = "file vuoto";
       } else lastErr = "HTTP " + r.status;
     } catch (e: any) {
-      lastErr = e.name === "AbortError" ? "timeout (il server sta estraendo i sottotitoli)" : (e.message || "errore rete");
+      lastErr = e.name === "AbortError" ? "timeout (estrazione lato server)" : (e.message || "errore rete");
     }
   }
   throw new Error(lastErr);
@@ -204,23 +205,16 @@ function parseTimestamp(s: string) {
 }
 
 function cleanSubText(lines: string[]) {
-  return lines.join("\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/\{\\[^}]*\}/g, "")
-    .replace(/\{[^}]*\}/g, "")
-    .replace(/\\N/g, "\n")
-    .replace(/\\n/g, "\n")
-    .trim();
+  return lines.join("\n").replace(/<[^>]+>/g, "").replace(/\{\\[^}]*\}/g, "").replace(/\{[^}]*\}/g, "")
+    .replace(/\\N/g, "\n").replace(/\\n/g, "\n").trim();
 }
 
 function parseSubtitles(raw: string) {
   const text = String(raw || "").replace(/\r/g, "").replace(/^\uFEFF/, "");
-  const blocks = text.split(/\n{2,}/);
   const cues: { start: number; end: number; text: string }[] = [];
-  for (const block of blocks) {
+  for (const block of text.split(/\n{2,}/)) {
     const lines = block.split("\n").filter(l => l.trim() !== "");
-    if (!lines.length) continue;
-    if (/^(WEBVTT|NOTE|STYLE|REGION)/i.test(lines[0])) continue;
+    if (!lines.length || /^(WEBVTT|NOTE|STYLE|REGION)/i.test(lines[0])) continue;
     let i = 0;
     if (!lines[i].includes("-->")) i = 1;
     if (i >= lines.length || !lines[i].includes("-->")) continue;
@@ -229,8 +223,7 @@ function parseSubtitles(raw: string) {
     const end = parseTimestamp(parts[1]);
     if (start == null || end == null) continue;
     const body = cleanSubText(lines.slice(i + 1));
-    if (!body) continue;
-    cues.push({ start, end, text: body });
+    if (body) cues.push({ start, end, text: body });
   }
   cues.sort((a, b) => a.start - b.start);
   return cues;
@@ -239,18 +232,16 @@ function parseSubtitles(raw: string) {
 function activeCueText(cues: any[], t: number) {
   if (!cues.length) return "";
   const out: string[] = [];
-  for (let i = 0; i < cues.length; i++) {
-    const c = cues[i];
+  for (const c of cues) {
     if (c.start > t + 0.05) break;
-    if (t >= c.start && t <= c.end && out.indexOf(c.text) < 0) out.push(c.text);
+    if (t >= c.start && t <= c.end && !out.includes(c.text)) out.push(c.text);
   }
   return out.join("\n");
 }
 
 function nativeProfile(force: boolean, bitrate: number) {
   return {
-    MaxStreamingBitrate: bitrate,
-    MaxStaticBitrate: 200000000,
+    MaxStreamingBitrate: bitrate, MaxStaticBitrate: 200000000,
     DirectPlayProfiles: force ? [] : [{ Container: "mp4,m4v,mov,mkv,webm", Type: "Video", VideoCodec: "h264,hevc,vp9,av1", AudioCodec: "aac,mp3,ac3,eac3,opus,flac,vorbis" }],
     TranscodingProfiles: [{ Container: "ts", Type: "Video", VideoCodec: "h264", AudioCodec: "aac,mp3", Context: "Streaming", Protocol: "hls", MaxAudioChannels: "2", MinSegments: "1", BreakOnNonKeyFrames: true }],
     SubtitleProfiles: [{ Format: "srt", Method: "External" }, { Format: "vtt", Method: "External" }, { Format: "ass", Method: "External" }]
@@ -262,22 +253,19 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     return {
       id: itemId, url: opts.demoUrl, method: "DirectPlay", hls: false, quality: opts.quality || "auto",
       duration: opts.duration || 0, audio: [{ Index: 0, DisplayTitle: "Originale · AAC", Language: "eng" }],
-      subs: [], audioIndex: 0, mediaSourceId: "demo", playSessionId: "demo",
-      reason: "Demo MP4/H.264", startOffset: 0
+      subs: [], audioIndex: 0, mediaSourceId: "demo", playSessionId: "demo", reason: "Demo", startOffset: 0
     };
   }
   const quality = opts.quality || settings.quality || "auto";
   const rates: any = { auto: 40000000, 2160: 40000000, 1080: 8000000, 720: 4000000, 480: 1500000, 360: 700000 };
   let bitrate = rates[quality] || 40000000;
   if (settings.saveData && quality === "auto") bitrate = 4000000;
-
   const startSeconds = Math.max(0, opts.startSeconds || 0);
   const explicitAudio = opts.audioIndex != null ? opts.audioIndex : null;
   const force = !!opts.force || settings.streamMode === "transcode" || quality !== "auto" || explicitAudio != null;
 
   const body: any = {
-    DeviceProfile: nativeProfile(force, bitrate),
-    AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate,
+    DeviceProfile: nativeProfile(force, bitrate), AutoOpenLiveStream: true, MaxStreamingBitrate: bitrate,
     EnableDirectPlay: !force, EnableDirectStream: !force, EnableTranscoding: true,
     AllowVideoStreamCopy: !force, AllowAudioStreamCopy: !force
   };
@@ -291,16 +279,13 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
   const j = await r.json();
   const ms = j.MediaSources && j.MediaSources[0];
   if (!ms) throw new Error("Nessuna MediaSource disponibile.");
-
   const audio = (ms.MediaStreams || []).filter((s: any) => s.Type === "Audio");
   const subs = (ms.MediaStreams || []).filter((s: any) => s.Type === "Subtitle");
-
   let ai = explicitAudio;
   if (ai == null) {
     const pref = audio.find((a: any) => String(a.Language || "").toLowerCase().startsWith(settings.audioLang));
     ai = pref ? pref.Index : ms.DefaultAudioStreamIndex != null ? ms.DefaultAudioStreamIndex : audio[0]?.Index ?? null;
   }
-
   let url: string, method: string;
   if (!force && ms.SupportsDirectPlay) {
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
@@ -313,13 +298,11 @@ async function getPlayback(session: any, itemId: string, settings: any, opts: an
     url = session.server + "/Videos/" + itemId + "/stream?static=true&mediaSourceId=" + ms.Id + "&api_key=" + session.token;
     method = "DirectPlay";
   }
-
   const hls = /\.m3u8/i.test(url);
   return {
     id: itemId, url, method, hls, quality, duration: (ms.RunTimeTicks || 0) / 1e7,
     audio, subs, audioIndex: ai, mediaSourceId: ms.Id, playSessionId: j.PlaySessionId,
-    reason: force ? "Transcoding richiesto" : "Direct Play nativo",
-    startOffset: hls && startSeconds > 0 ? startSeconds : 0
+    reason: force ? "Transcoding" : "Direct Play", startOffset: hls && startSeconds > 0 ? startSeconds : 0
   };
 }
 
@@ -356,11 +339,11 @@ function demoLibrary() {
     movie("codice", "Codice Rosso", 2025, ["Azione"], 18, "a", 88, "Un'ex agente deve fermare un attacco informatico globale.", 4),
     movie("mare", "Sotto la Pelle del Mare", 2024, ["Documentario"], 175, "c", 89, "Tre anni di riprese negli abissi del Mediterraneo.", 12),
     movie("vela", "Vela Solare", 2022, ["Animazione", "Avventura"], 55, "a", 87, "Una piccola sonda parte per un viaggio oltre il sistema solare.", 90),
-    series("cieli", "I Cieli di Ferro", 2024, ["Fantascienza", "Drammatico"], 205, 97, "Le città volano su piattaforme di ferro. Sotto le nuvole, qualcosa abita.", [
+    series("cieli", "I Cieli di Ferro", 2024, ["Fantascienza", "Drammatico"], 205, 97, "Le città volano su piattaforme di ferro.", [
       { n: 1, name: "Stagione 1", episodes: eps("cieli", 1, ["Il decollo", "Sotto le nuvole", "Ferro e cielo", "La caduta", "Vecchie rotte", "Il segnale"], 205) },
       { n: 2, name: "Stagione 2", episodes: eps("cieli", 2, ["Ritorno a bordo", "La città fantasma", "Gravità zero", "Il patto", "Punto di fuga", "Cieli aperti"], 225) }
     ], 3),
-    series("palude", "Palude", 2023, ["Thriller", "Giallo"], 150, 94, "Un paese di nebbia e canali, una serie di sparizioni che nessuno collega.", [
+    series("palude", "Palude", 2023, ["Thriller", "Giallo"], 150, 94, "Un paese di nebbia e canali, una serie di sparizioni.", [
       { n: 1, name: "Stagione 1", episodes: eps("palude", 1, ["Acqua alta", "Il canale", "Nebbia", "Radici", "La chiusa", "Marea"], 150) }
     ], 20)
   ];
@@ -430,29 +413,18 @@ function Poster({ item, wide, ep, progress }: any) {
   const pct = p && p.duration ? Math.max(0, Math.min(100, (p.position / p.duration) * 100)) : 0;
   return (
     <View style={[styles.poster, wide ? styles.posterWide : styles.posterTall]}>
-      {uri ? (
-        <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => { if (uri !== fallback) setUri(fallback); }} />
-      ) : (
-        <View style={[StyleSheet.absoluteFill, styles.posterFallback, { backgroundColor: "hsl(" + (item.hue || 210) + ",55%,22%)" }]}>
-          <Text style={styles.posterFallbackTitle}>{item.title}</Text>
-        </View>
-      )}
+      {uri ? <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => { if (uri !== fallback) setUri(fallback); }} />
+        : <View style={[StyleSheet.absoluteFill, styles.posterFallback, { backgroundColor: "hsl(" + (item.hue || 210) + ",55%,22%)" }]}><Text style={styles.posterFallbackTitle}>{item.title}</Text></View>}
       {!!ep && <View style={styles.epBadge}><Text style={styles.epBadgeText}>S{ep.season} · E{ep.episode}</Text></View>}
       {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
-      {wide && (
-        <View style={styles.wideLabel}>
-          <Text numberOfLines={1} style={styles.wideLabelTitle}>{ep ? ep.title : item.title}</Text>
-          {!!ep && <Text numberOfLines={1} style={styles.wideLabelSub}>{item.title}</Text>}
-        </View>
-      )}
+      {wide && <View style={styles.wideLabel}><Text numberOfLines={1} style={styles.wideLabelTitle}>{ep ? ep.title : item.title}</Text>{!!ep && <Text numberOfLines={1} style={styles.wideLabelSub}>{item.title}</Text>}</View>}
     </View>
   );
 }
 
 function MediaCard({ item, ep, wide, onPress, onLongPress, progress, width }: any) {
   return (
-    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={350}
-      style={({ pressed }) => [styles.card, { width }, pressed && styles.cardPressed]}>
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={350} style={({ pressed }) => [styles.card, { width }, pressed && styles.cardPressed]}>
       <Poster item={item} ep={ep} wide={wide} progress={progress} />
     </Pressable>
   );
@@ -463,9 +435,7 @@ function Row({ title, data, renderItem, keyExtractor }: any) {
   return (
     <View style={styles.row}>
       <Text style={styles.rowTitle}>{title}</Text>
-      <FlatList horizontal data={data} keyExtractor={keyExtractor} renderItem={renderItem}
-        showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rowContent}
-        ItemSeparatorComponent={() => <View style={{ width: 10 }} />} />
+      <FlatList horizontal data={data} keyExtractor={keyExtractor} renderItem={renderItem} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rowContent} ItemSeparatorComponent={() => <View style={{ width: 10 }} />} />
     </View>
   );
 }
@@ -499,10 +469,13 @@ function MenuHeader({ title, onBack, onClose }: any) {
   );
 }
 
-/* ================= PLAYER PROVIDER (vive sopra la navigazione) ================= */
+function AppStatusBar() {
+  const P = usePlayer();
+  return <StatusBar hidden={P.mode === "full"} barStyle="light-content" backgroundColor="transparent" translucent />;
+}
 
 function PlayerProvider({ children }: any) {
-  const { session, settings, saveProgress, epMap, progress } = useApp();
+  const { session, settings, saveProgress, progress } = useApp();
   const player = useVideoPlayer(null, p => { p.loop = false; });
 
   const [mode, setMode] = useState<"closed" | "full" | "mini">("closed");
@@ -528,7 +501,7 @@ function PlayerProvider({ children }: any) {
   const [landscape, setLandscape] = useState(false);
   const [controls, setControls] = useState(true);
   const [menu, setMenu] = useState<string | null>(null);
-  const [dragY, setDragY] = useState(0);
+  const [fit, setFit] = useState<"contain" | "cover">("contain");
 
   const baseOffset = useRef(0);
   const pendingSeek = useRef<number | null>(null);
@@ -546,7 +519,6 @@ function PlayerProvider({ children }: any) {
   const subLangRef = useRef("");
   const noticeTimer = useRef<any>(null);
   const playingRef = useRef(false);
-  const modeRef = useRef<any>("closed");
   const settingsRef = useRef(settings);
 
   useEffect(() => { infoRef.current = info; }, [info]);
@@ -555,7 +527,6 @@ function PlayerProvider({ children }: any) {
   useEffect(() => { positionRef.current = position; }, [position]);
   useEffect(() => { subIndexRef.current = subIndex; }, [subIndex]);
   useEffect(() => { playingRef.current = playing; }, [playing]);
-  useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   useEffect(() => {
@@ -571,9 +542,20 @@ function PlayerProvider({ children }: any) {
   }, [settings.speed, settings.loop, settings.background, player]);
 
   useEffect(() => {
+    if (mode === "full") {
+      NavigationBar.setVisibilityAsync("hidden").catch(() => {});
+      NavigationBar.setBehaviorAsync("overlay-swipe").catch(() => {});
+    } else {
+      NavigationBar.setVisibilityAsync("visible").catch(() => {});
+    }
+    return () => { NavigationBar.setVisibilityAsync("visible").catch(() => {}); };
+  }, [mode]);
+
+  useEffect(() => {
     const sub = AppState.addEventListener("change", state => {
       if (state !== "active" && playingRef.current && settingsRef.current.pip) {
-        try { (player as any).startPictureInPicture?.(); } catch {}
+        const p = player as any;
+        try { if (typeof p.enterPictureInPicture === "function") p.enterPictureInPicture(); else if (typeof p.startPictureInPicture === "function") p.startPictureInPicture(); } catch {}
       }
     });
     return () => sub.remove();
@@ -581,6 +563,7 @@ function PlayerProvider({ children }: any) {
 
   useEffect(() => () => {
     ScreenOrientation.unlockAsync().catch(() => {});
+    NavigationBar.setVisibilityAsync("visible").catch(() => {});
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
   }, []);
 
@@ -596,22 +579,18 @@ function PlayerProvider({ children }: any) {
     if (session.mode === "demo") { if (!silent) flash("Nessun sottotitolo nella demo."); return; }
     if (!isTextSub(stream)) { if (!silent) flash("Sottotitoli grafici (PGS): non supportati senza transcoding."); return; }
     setSubLoading(true);
-    if (!silent) flash("Carico i sottotitoli… la riproduzione continua.");
+    if (!silent) flash("Carico i sottotitoli… il video continua.");
     try {
       const raw = await fetchSubtitleText(session, inf.id, inf.mediaSourceId, stream.Index);
       const parsed = parseSubtitles(raw);
       if (!parsed.length) throw new Error("nessuna battuta leggibile");
-      setCues(parsed);
-      setSubIndex(stream.Index);
-      subIndexRef.current = stream.Index;
-      subLangRef.current = String(stream.Language || "");
+      setCues(parsed); setSubIndex(stream.Index);
+      subIndexRef.current = stream.Index; subLangRef.current = String(stream.Language || "");
       if (!silent) flash("Sottotitoli: " + (stream.DisplayTitle || stream.Language || "attivi"));
     } catch (e: any) {
       setCues([]); setSubIndex(null); subIndexRef.current = null;
       if (!silent) flash("Sottotitoli: " + (e.message || "errore"));
-    } finally {
-      setSubLoading(false);
-    }
+    } finally { setSubLoading(false); }
   }
 
   async function load(opts: any = {}, itArg = itemRef.current, epArg = episodeRef.current, startAt = 0) {
@@ -621,121 +600,79 @@ function PlayerProvider({ children }: any) {
     seekLock.current = Date.now() + 1200;
     try {
       const inf = await getPlayback(session, epArg ? epArg.id : itArg.id, settingsRef.current, {
-        ...optsRef.current, startSeconds: startAt,
-        demoUrl: epArg?.video || itArg.video, duration: epArg?.duration || itArg.duration
+        ...optsRef.current, startSeconds: startAt, demoUrl: epArg?.video || itArg.video, duration: epArg?.duration || itArg.duration
       });
-      infoRef.current = inf;
-      setInfo(inf);
+      infoRef.current = inf; setInfo(inf);
       setDuration(inf.duration || epArg?.duration || itArg.duration || 0);
       baseOffset.current = inf.startOffset || 0;
       pendingSeek.current = inf.hls ? null : startAt;
       setPosition(startAt); positionRef.current = startAt;
-      player.replace({ uri: inf.url });
+
+      const metaTitle = epArg ? `${epArg.title}` : itArg.title;
+      const metaArtist = epArg ? `${itArg.title} · S${epArg.season}:E${epArg.episode}` : (itArg.year ? String(itArg.year) : "NOVA");
+      player.replace({ uri: inf.url, metadata: { title: metaTitle, artist: metaArtist, artwork: itArg.poster || itArg.backdrop } });
 
       const s = settingsRef.current;
       if (subIndexRef.current != null) {
-        const match = (inf.subs || []).find((x: any) => x.Index === subIndexRef.current)
-          || (inf.subs || []).find((x: any) => String(x.Language || "") === subLangRef.current && isTextSub(x));
-        if (match) loadSubTrack(match, true);
-        else { setCues([]); setSubIndex(null); subIndexRef.current = null; }
+        const match = (inf.subs || []).find((x: any) => x.Index === subIndexRef.current) || (inf.subs || []).find((x: any) => String(x.Language || "") === subLangRef.current && isTextSub(x));
+        if (match) loadSubTrack(match, true); else { setCues([]); setSubIndex(null); subIndexRef.current = null; }
       } else if (s.autoSub) {
         const pref = (inf.subs || []).find((x: any) => String(x.Language || "").toLowerCase().startsWith(s.subLang) && isTextSub(x));
         if (pref) loadSubTrack(pref, true);
       }
-    } catch (e: any) {
-      setError(e.message || "Errore di riproduzione.");
-      setLoading(false);
-    }
+    } catch (e: any) { setError(e.message || "Errore di riproduzione."); setLoading(false); }
   }
 
   async function open(it: any, ep: any = null, startAt?: number) {
     if (!it) return;
     let e = ep;
-    if (it.type === "series" && !e) {
-      try { const ss = await loadSeasons(session, it); e = targetEpisode(ss, progress); } catch {}
-    }
-    setItem(it); itemRef.current = it;
-    setEpisode(e); episodeRef.current = e;
-    setMode("full"); modeRef.current = "full";
-    setStarted(false); setControls(true); setCues([]); setSubIndex(null);
-    subIndexRef.current = null; subLangRef.current = "";
-    finishedRef.current = false; retried.current = false; optsRef.current = {};
+    if (it.type === "series" && !e) { try { const ss = await loadSeasons(session, it); e = targetEpisode(ss, progress); } catch {} }
+    setItem(it); itemRef.current = it; setEpisode(e); episodeRef.current = e;
+    setMode("full"); setStarted(false); setControls(true); setCues([]); setSubIndex(null);
+    subIndexRef.current = null; subLangRef.current = ""; finishedRef.current = false; retried.current = false; optsRef.current = {};
     const id = e ? e.id : it.id;
     const start = startAt != null ? startAt : (isWatched(progress[id]) ? 0 : (progress[id]?.position || 0));
     await load({}, it, e, start);
   }
 
   function minimize() {
-    setMode("mini"); modeRef.current = "mini";
-    setMenu(null); setDragY(0);
+    setMode("mini"); setMenu(null); setLandscape(false);
     ScreenOrientation.unlockAsync().catch(() => {});
-    setLandscape(false);
   }
-
-  function expand() {
-    setMode("full"); modeRef.current = "full";
-    setControls(true);
-  }
-
+  function expand() { setMode("full"); setControls(true); }
   function close() {
     try { player.pause(); } catch {}
     if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true);
-    setMode("closed"); modeRef.current = "closed";
-    setMenu(null); setEnded(false); setCues([]); setSubIndex(null);
-    subIndexRef.current = null;
-    ScreenOrientation.unlockAsync().catch(() => {});
-    setLandscape(false);
+    setMode("closed"); setMenu(null); setEnded(false); setCues([]); setSubIndex(null); subIndexRef.current = null;
+    ScreenOrientation.unlockAsync().catch(() => {}); setLandscape(false);
   }
 
   useEventListener(player, "statusChange", ({ status, error: err }: any) => {
     if (status === "readyToPlay") {
       setBuffering(false); setLoading(false); setStarted(true);
-      try {
-        const vt = player.videoTrack;
-        if (vt?.width && vt?.height) setVideoSize({ w: vt.width, h: vt.height });
-      } catch {}
-      if (pendingSeek.current != null) {
-        const t = pendingSeek.current; pendingSeek.current = null;
-        try { player.currentTime = t; } catch {}
-      }
+      try { const vt = player.videoTrack; if (vt?.width && vt?.height) setVideoSize({ w: vt.width, h: vt.height }); } catch {}
+      if (pendingSeek.current != null) { const t = pendingSeek.current; pendingSeek.current = null; try { player.currentTime = t; } catch {} }
       try { player.play(); } catch {}
-    } else if (status === "loading") {
-      setBuffering(true);
-    } else if (status === "error") {
+    } else if (status === "loading") setBuffering(true);
+    else if (status === "error") {
       setBuffering(false);
-      if (!retried.current && infoRef.current?.method === "DirectPlay") {
-        retried.current = true;
-        flash("Formato non supportato: passo al transcoding…");
-        load({ force: true }, itemRef.current, episodeRef.current, positionRef.current);
-      } else {
-        setError(err?.message || "Il dispositivo non riesce a decodificare questo stream.");
-        setLoading(false);
-      }
+      if (!retried.current && infoRef.current?.method === "DirectPlay") { retried.current = true; flash("Formato non supportato: transcoding…"); load({ force: true }, itemRef.current, episodeRef.current, positionRef.current); }
+      else { setError(err?.message || "Stream non decodificabile."); setLoading(false); }
     }
   });
 
-  useEventListener(player, "videoTrackChange", ({ videoTrack }: any) => {
-    if (videoTrack?.width && videoTrack?.height) setVideoSize({ w: videoTrack.width, h: videoTrack.height });
-  });
+  useEventListener(player, "videoTrackChange", ({ videoTrack }: any) => { if (videoTrack?.width && videoTrack?.height) setVideoSize({ w: videoTrack.width, h: videoTrack.height }); });
 
   useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
     if (scrubbingRef.current || Date.now() < seekLock.current) return;
     const pos = baseOffset.current + (currentTime || 0);
-    positionRef.current = pos;
-    setPosition(pos);
+    positionRef.current = pos; setPosition(pos);
     const dur = infoRef.current?.duration || player.duration || 0;
     if (dur > 0) setDuration(dur);
-    const it = itemRef.current;
-    if (!it) return;
+    const it = itemRef.current; if (!it) return;
     const id = episodeRef.current ? episodeRef.current.id : it.id;
-    if (Date.now() - lastSave.current > 5000 && dur > 0) {
-      lastSave.current = Date.now();
-      saveProgress(id, pos, dur);
-    }
-    if (dur > 0 && pos >= dur - 1 && !finishedRef.current) {
-      finishedRef.current = true;
-      handleEnd();
-    }
+    if (Date.now() - lastSave.current > 5000 && dur > 0) { lastSave.current = Date.now(); saveProgress(id, pos, dur); }
+    if (dur > 0 && pos >= dur - 1 && !finishedRef.current) { finishedRef.current = true; handleEnd(); }
   });
 
   useEventListener(player, "playingChange", ({ isPlaying }: any) => setPlaying(!!isPlaying));
@@ -760,40 +697,27 @@ function PlayerProvider({ children }: any) {
   }, [ended, nextEp, settings.autoplay]);
 
   async function handleEnd() {
-    const it = itemRef.current;
-    if (!it) return;
+    const it = itemRef.current; if (!it) return;
     const id = episodeRef.current ? episodeRef.current.id : it.id;
     const dur = infoRef.current?.duration || duration;
     saveProgress(id, dur, dur);
     let nx = null;
-    if (it.type === "series" && episodeRef.current) {
-      try { const ss = await loadSeasons(session, it); nx = findNextEpisode(ss, episodeRef.current); } catch {}
-    }
+    if (it.type === "series" && episodeRef.current) { try { const ss = await loadSeasons(session, it); nx = findNextEpisode(ss, episodeRef.current); } catch {} }
     setNextEp(nx); setEnded(true);
   }
 
-  function beginScrub() {
-    scrubbingRef.current = true;
-    setScrubbing(true);
-    setScrub(positionRef.current);
-  }
-
+  function beginScrub() { scrubbingRef.current = true; setScrubbing(true); setScrub(positionRef.current); }
   function endScrub(target: number) {
     const dur = infoRef.current?.duration || duration || 0;
     const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
-    scrubbingRef.current = false;
-    setScrubbing(false);
+    scrubbingRef.current = false; setScrubbing(false);
     seekLock.current = Date.now() + 1200;
-    setPosition(T); positionRef.current = T;
-    finishedRef.current = false; setEnded(false);
+    setPosition(T); positionRef.current = T; finishedRef.current = false; setEnded(false);
     if (infoRef.current?.hls) load(optsRef.current, itemRef.current, episodeRef.current, T);
     else { try { player.currentTime = T; } catch {} }
   }
 
-  function togglePlay() {
-    try { if (playing) player.pause(); else player.play(); } catch {}
-    setControls(true);
-  }
+  function togglePlay() { try { if (playing) player.pause(); else player.play(); } catch {} setControls(true); }
 
   async function rotate() {
     try {
@@ -803,49 +727,29 @@ function PlayerProvider({ children }: any) {
     setControls(true);
   }
 
-  async function switchAudio(index: number) {
-    setMenu(null);
-    flash("Cambio audio…");
-    await load({ audioIndex: index, force: true }, itemRef.current, episodeRef.current, positionRef.current);
-  }
-
+  async function switchAudio(index: number) { setMenu(null); flash("Cambio audio…"); await load({ audioIndex: index, force: true }, itemRef.current, episodeRef.current, positionRef.current); }
   function selectSub(stream: any | null) {
     setMenu(null);
-    if (!stream) {
-      setCues([]); setSubIndex(null); subIndexRef.current = null; subLangRef.current = "";
-      flash("Sottotitoli disattivati");
-      return;
-    }
+    if (!stream) { setCues([]); setSubIndex(null); subIndexRef.current = null; subLangRef.current = ""; flash("Sottotitoli disattivati"); return; }
     loadSubTrack(stream);
   }
-
-  function setQuality(q: string) {
-    setMenu(null);
-    flash("Qualità: " + (q === "auto" ? "auto" : q + "p"));
-    load({ quality: q, force: q !== "auto" }, itemRef.current, episodeRef.current, positionRef.current);
-  }
-
+  function setQuality(q: string) { setMenu(null); flash("Qualità: " + (q === "auto" ? "auto" : q + "p")); load({ quality: q, force: q !== "auto" }, itemRef.current, episodeRef.current, positionRef.current); }
   function playEpisode(ep: any) {
-    setEnded(false); setNextEp(null);
-    setEpisode(ep); episodeRef.current = ep;
-    finishedRef.current = false; retried.current = false; optsRef.current = {};
-    setCues([]);
+    setEnded(false); setNextEp(null); setEpisode(ep); episodeRef.current = ep;
+    finishedRef.current = false; retried.current = false; optsRef.current = {}; setCues([]);
     load({}, itemRef.current, ep, 0);
   }
 
   const value = {
     player, mode, item, episode, info, loading, buffering, started, error, playing,
     position, duration, scrubbing, scrub, cues, subIndex, subLoading, notice, ended,
-    nextEp, videoSize, landscape, controls, menu, dragY,
-    setControls, setMenu, setDragY, setScrub,
+    nextEp, videoSize, landscape, controls, menu, fit,
+    setControls, setMenu, setScrub, setFit,
     open, close, minimize, expand, togglePlay, beginScrub, endScrub, rotate,
     switchAudio, selectSub, setQuality, playEpisode, flash
   };
-
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
-
-/* ================= OVERLAY PLAYER ================= */
 
 function PlayerOverlay() {
   const P = usePlayer();
@@ -853,26 +757,29 @@ function PlayerOverlay() {
   const dim = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = P.landscape || dim.width > dim.height;
+  const drag = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => { if (P.mode === "full") drag.setValue(0); }, [P.mode]);
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: (_, g) => !isLandscape && g.dy > 14 && Math.abs(g.dy) > Math.abs(g.dx) * 1.4,
-    onPanResponderMove: (_, g) => P.setDragY(Math.max(0, g.dy)),
-    onPanResponderRelease: (_, g) => { if (g.dy > 90) P.minimize(); else P.setDragY(0); },
-    onPanResponderTerminate: () => P.setDragY(0)
+    onMoveShouldSetPanResponder: (_, g) => !isLandscape && g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.3,
+    onPanResponderMove: (_, g) => drag.setValue(Math.max(0, g.dy)),
+    onPanResponderRelease: (_, g) => {
+      if (g.dy > 100 || g.vy > 0.8) {
+        Animated.timing(drag, { toValue: dim.height, duration: 190, useNativeDriver: true }).start(() => { drag.setValue(0); P.minimize(); });
+      } else {
+        Animated.spring(drag, { toValue: 0, useNativeDriver: true, friction: 7, tension: 60 }).start();
+      }
+    },
+    onPanResponderTerminate: () => Animated.spring(drag, { toValue: 0, useNativeDriver: true }).start()
   })).current;
 
   if (P.mode !== "full" || !P.item) return null;
 
   const aspect = P.videoSize.w && P.videoSize.h ? P.videoSize.w / P.videoSize.h : 16 / 9;
-  let vw: number, vh: number;
-  if (isLandscape) {
-    vw = dim.width; vh = dim.width / aspect;
-    if (vh > dim.height) { vh = dim.height; vw = dim.height * aspect; }
-  } else {
-    vw = dim.width; vh = Math.min(dim.width / aspect, dim.height * 0.42);
-  }
-
+  const vw = dim.width;
+  const vh = isLandscape ? dim.height : Math.min(dim.width / aspect, dim.height * 0.42);
   const subText = activeCueText(P.cues, P.position);
   const showControls = isLandscape ? P.controls : true;
   const bigSpinner = (P.loading || P.buffering) && !P.started;
@@ -884,25 +791,20 @@ function PlayerOverlay() {
   const activeAudio = P.info?.audio?.find((a: any) => a.Index === P.info.audioIndex);
   const activeSub = (P.info?.subs || []).find((s: any) => s.Index === P.subIndex);
   const similar = items.filter((x: any) => x.id !== P.item.id && x.genres.some((g: string) => P.item.genres.includes(g))).slice(0, 6);
+  const dragScale = drag.interpolate({ inputRange: [0, 320], outputRange: [1, 0.82], extrapolate: "clamp" });
+  const dragRadius = drag.interpolate({ inputRange: [0, 120], outputRange: [0, 14], extrapolate: "clamp" });
 
   const videoBlock = (
-    <View
-      style={[styles.videoBox, { width: vw, height: vh, transform: [{ translateY: isLandscape ? 0 : P.dragY }] }]}
+    <Animated.View
+      style={[styles.videoBox, { width: vw, height: vh, borderRadius: isLandscape ? 0 : dragRadius, transform: isLandscape ? [] : [{ translateY: drag }, { scale: dragScale }] }]}
       {...(!isLandscape ? pan.panHandlers : {})}
     >
-      <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} allowsPictureInPicture />
+      <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit={isLandscape ? P.fit : "contain"} nativeControls={false} allowsPictureInPicture />
       <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
 
-      {!!subText && (
-        <View style={[styles.subBox, { bottom: showControls && isLandscape ? 78 : 14 }]} pointerEvents="none">
-          <Text style={[styles.subText, { fontSize: settings.subSize, lineHeight: settings.subSize * 1.3 }]}>{subText}</Text>
-        </View>
-      )}
+      {!!subText && <View style={[styles.subBox, { bottom: showControls && isLandscape ? 82 : 14 }]} pointerEvents="none"><Text style={[styles.subText, { fontSize: settings.subSize, lineHeight: settings.subSize * 1.3 }]}>{subText}</Text></View>}
 
-      {bigSpinner && (
-        <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>
-      )}
-
+      {bigSpinner && <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View>}
       {showControls && !bigSpinner && !P.ended && !P.error && (
         <Pressable onPress={P.togglePlay} style={styles.centerPlay} hitSlop={26}>
           <Ionicons name={P.playing ? "pause" : "play"} size={isLandscape ? 60 : 46} color="#fff" style={styles.centerIcon} />
@@ -912,27 +814,27 @@ function PlayerOverlay() {
       {showControls && !P.error && (
         <>
           <LinearGradient colors={["rgba(0,0,0,0.7)", "transparent"]} style={styles.vTopScrim} pointerEvents="none" />
-          <View style={styles.vTop}>
+          <View style={[styles.vTop, { top: isLandscape ? Math.max(insets.top, 4) : 4 }]}>
             <IconButton name="chevron-down" size={26} onPress={P.minimize} />
-            <View style={{ flex: 1 }} />
-            {P.buffering && P.started && <ActivityIndicator color={C.red} size="small" style={{ marginRight: 8 }} />}
+            <View style={{ flex: 1 }}>
+              {isLandscape && <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text>}
+            </View>
+            {P.buffering && P.started && <ActivityIndicator color={C.red} size="small" style={{ marginRight: 6 }} />}
+            {isLandscape && <IconButton name={P.fit === "contain" ? "scan-outline" : "contract-outline"} size={22} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />}
             <IconButton name="sync-outline" size={22} onPress={P.rotate} />
           </View>
 
           <LinearGradient colors={["transparent", "rgba(0,0,0,0.8)"]} style={styles.vBottomScrim} pointerEvents="none" />
-          <View style={styles.vBottom}>
+          <View style={[styles.vBottom, { bottom: isLandscape ? Math.max(insets.bottom, 2) : 2 }]}>
             <Slider style={{ width: "100%", height: 28 }} minimumValue={0} maximumValue={Math.max(1, P.duration)}
-              value={P.scrubbing ? P.scrub : P.position} minimumTrackTintColor={C.red}
-              maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
+              value={P.scrubbing ? P.scrub : P.position} minimumTrackTintColor={C.red} maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
               onSlidingStart={P.beginScrub} onValueChange={P.setScrub} onSlidingComplete={P.endScrub} />
             <View style={styles.vControls}>
               <Text style={styles.playerTime}>{fmt(P.scrubbing ? P.scrub : P.position)} <Text style={styles.faint}>/ {fmt(P.duration)}</Text></Text>
               <View style={{ flex: 1 }} />
               <IconButton name="musical-notes-outline" size={20} onPress={() => P.setMenu("audio")} />
               <IconButton name="chatbox-ellipses-outline" size={20} active={P.subIndex != null} onPress={() => P.setMenu("subs")} />
-              <Pressable onPress={() => P.setMenu("quality")} style={styles.hdButton}>
-                <View style={styles.hdBox}><Text style={styles.hdText}>{P.info?.quality && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View>
-              </Pressable>
+              <Pressable onPress={() => P.setMenu("quality")} style={styles.hdButton}><View style={styles.hdBox}><Text style={styles.hdText}>{P.info?.quality && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View></Pressable>
               <IconButton name="settings-outline" size={20} onPress={() => P.setMenu("root")} />
             </View>
           </View>
@@ -954,15 +856,12 @@ function PlayerOverlay() {
       {P.ended && (
         <View style={styles.vError}>
           <Text style={styles.endLabel}>{P.nextEp ? "Prossimo episodio" : "Fine"}</Text>
-          {P.nextEp ? (
+          {P.nextEp && (
             <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.nextCard}>
               <View style={styles.nextThumb} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.episodeTitle}>S{P.nextEp.season}:E{P.nextEp.episode} · {P.nextEp.title}</Text>
-                <Text style={styles.mutedSm}>{P.item.title}</Text>
-              </View>
+              <View style={{ flex: 1 }}><Text style={styles.episodeTitle}>S{P.nextEp.season}:E{P.nextEp.episode} · {P.nextEp.title}</Text><Text style={styles.mutedSm}>{P.item.title}</Text></View>
             </Pressable>
-          ) : null}
+          )}
           <View style={styles.actions}>
             {P.nextEp && <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.whiteButton}><Ionicons name="play" size={18} color="#000" /><Text style={styles.whiteButtonText}>Guarda</Text></Pressable>}
             <Pressable onPress={() => P.endScrub(0)} style={styles.ghostButton}><Ionicons name="refresh" size={18} color="#fff" /><Text style={styles.ghostButtonText}>Riguarda</Text></Pressable>
@@ -970,15 +869,12 @@ function PlayerOverlay() {
           </View>
         </View>
       )}
-    </View>
+    </Animated.View>
   );
 
   return (
     <View style={[styles.overlayRoot, isLandscape ? styles.overlayLand : { paddingTop: insets.top }]}>
-      <StatusBar hidden={isLandscape} barStyle="light-content" />
-      {isLandscape ? (
-        <View style={styles.landWrap}>{videoBlock}</View>
-      ) : (
+      {isLandscape ? <View style={styles.landWrap}>{videoBlock}</View> : (
         <>
           {videoBlock}
           <ScrollView style={styles.infoPanel} contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 30 }}>
@@ -991,21 +887,13 @@ function PlayerOverlay() {
               {P.subLoading && <Text style={styles.subLoading}>carico sottotitoli…</Text>}
             </View>
             <View style={[styles.actions, { marginVertical: 14 }]}>
-              <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, inList && styles.roundOn]}>
-                <Ionicons name={inList ? "checkmark" : "add"} size={24} color={inList ? C.green : "#fff"} />
-              </Pressable>
-              <Pressable
-                onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }}
-                style={styles.ghostButton}>
-                <Ionicons name="information-circle-outline" size={20} color="#fff" />
-                <Text style={styles.ghostButtonText}>Dettagli</Text>
-              </Pressable>
+              <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={24} color={inList ? C.green : "#fff"} /></Pressable>
+              <Pressable onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }} style={styles.ghostButton}><Ionicons name="information-circle-outline" size={20} color="#fff" /><Text style={styles.ghostButtonText}>Dettagli</Text></Pressable>
             </View>
             {!!P.episode?.overview && <Text style={styles.infoDesc}>{P.episode.overview}</Text>}
             {!!P.item.overview && <Text style={styles.infoDesc}>{P.item.overview}</Text>}
             <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{P.item.genres.join(", ") || "–"}</Text>
             <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{(P.item.cast || []).join(", ") || "–"}</Text>
-
             {settings.stats && P.info && (
               <View style={styles.statsInline}>
                 <Text style={styles.statsTitle}>STATISTICHE</Text>
@@ -1015,16 +903,11 @@ function PlayerOverlay() {
                 <Text style={styles.statsLine}>{P.info.reason}</Text>
               </View>
             )}
-
             {!!similar.length && (
               <>
                 <Text style={styles.sectionTitle}>Altri titoli simili</Text>
                 <View style={styles.similarGrid}>
-                  {similar.map((x: any) => (
-                    <View key={x.id} style={styles.similarItem}>
-                      <MediaCard item={x} width="100%" onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: x.id }); }} />
-                    </View>
-                  ))}
+                  {similar.map((x: any) => <View key={x.id} style={styles.similarItem}><MediaCard item={x} width="100%" onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: x.id }); }} /></View>)}
                 </View>
               </>
             )}
@@ -1032,7 +915,7 @@ function PlayerOverlay() {
         </>
       )}
 
-      {!!P.notice && <View style={[styles.notice, { top: isLandscape ? 12 : insets.top + vh + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View>}
+      {!!P.notice && <View style={[styles.notice, { top: isLandscape ? Math.max(insets.top, 12) : insets.top + vh + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View>}
 
       <Modal visible={!!P.menu} transparent animationType="fade" onRequestClose={() => P.setMenu(null)}>
         <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => P.setMenu(null)}>
@@ -1043,6 +926,7 @@ function PlayerOverlay() {
                   <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
                   <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
                   <MenuItem label="Dimensione sottotitoli" value={settings.subSize + "px"} onPress={() => P.setMenu("subsize")} />
+                  <MenuItem label="Riempimento schermo" value={P.fit === "contain" ? "Adatta" : "Riempi"} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />
                   <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
                   <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
                   <MenuToggle label="Background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
@@ -1053,49 +937,16 @@ function PlayerOverlay() {
                   <MenuItem label="Chiudi video" onPress={() => { P.setMenu(null); P.close(); }} />
                 </>
               )}
-              {P.menu === "speed" && (
-                <>
-                  <MenuHeader title="Velocità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
-                  {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => (
-                    <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />
-                  ))}
-                </>
-              )}
-              {P.menu === "subsize" && (
-                <>
-                  <MenuHeader title="Dimensione sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
-                  {[14, 16, 18, 20, 24, 28, 32].map(s => (
-                    <MenuItem key={s} label={s + " px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />
-                  ))}
-                </>
-              )}
-              {P.menu === "quality" && (
-                <>
-                  <MenuHeader title="Qualità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
-                  {["auto", "2160", "1080", "720", "480", "360"].map(q => (
-                    <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(P.info?.quality) === q} onPress={() => P.setQuality(q)} />
-                  ))}
-                </>
-              )}
-              {P.menu === "audio" && (
-                <>
-                  <MenuHeader title="Audio" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
-                  {(P.info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia selezionabile.</Text>}
-                  {(P.info?.audio || []).map((a: any) => (
-                    <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={P.info?.audioIndex === a.Index} onPress={() => P.switchAudio(a.Index)} />
-                  ))}
-                </>
-              )}
+              {P.menu === "speed" && (<><MenuHeader title="Velocità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />)}</>)}
+              {P.menu === "subsize" && (<><MenuHeader title="Dimensione sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{[14, 16, 18, 20, 24, 28, 32].map(s => <MenuItem key={s} label={s + " px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />)}</>)}
+              {P.menu === "quality" && (<><MenuHeader title="Qualità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{["auto", "2160", "1080", "720", "480", "360"].map(q => <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(P.info?.quality) === q} onPress={() => P.setQuality(q)} />)}</>)}
+              {P.menu === "audio" && (<><MenuHeader title="Audio" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />{(P.info?.audio || []).length === 0 && <Text style={styles.menuNote}>Nessuna traccia selezionabile.</Text>}{(P.info?.audio || []).map((a: any) => <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={P.info?.audioIndex === a.Index} onPress={() => P.switchAudio(a.Index)} />)}</>)}
               {P.menu === "subs" && (
                 <>
                   <MenuHeader title="Sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
-                  {P.subLoading && <Text style={styles.menuNote}>Caricamento in corso… il video continua a suonare.</Text>}
+                  {P.subLoading && <Text style={styles.menuNote}>Caricamento… il video continua.</Text>}
                   <MenuItem label="Disattivati" selected={P.subIndex == null} onPress={() => P.selectSub(null)} />
-                  {(P.info?.subs || []).map((s: any) => (
-                    <MenuItem key={s.Index}
-                      label={(s.DisplayTitle || s.Language || "Sub " + s.Index) + (isTextSub(s) ? "" : "  · grafico")}
-                      selected={P.subIndex === s.Index} disabled={!isTextSub(s)} onPress={() => P.selectSub(s)} />
-                  ))}
+                  {(P.info?.subs || []).map((s: any) => <MenuItem key={s.Index} label={(s.DisplayTitle || s.Language || "Sub " + s.Index) + (isTextSub(s) ? "" : "  · grafico")} selected={P.subIndex === s.Index} disabled={!isTextSub(s)} onPress={() => P.selectSub(s)} />)}
                   {(P.info?.subs || []).length === 0 && <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text>}
                 </>
               )}
@@ -1117,13 +968,8 @@ function MiniPlayer() {
   return (
     <View style={[styles.mini, { bottom: insets.bottom + 8 }]}>
       <Pressable style={styles.miniRow} onPress={P.expand}>
-        <View style={styles.miniVideo}>
-          <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="cover" nativeControls={false} allowsPictureInPicture />
-        </View>
-        <View style={{ flex: 1, paddingRight: 6 }}>
-          <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
-          <Text numberOfLines={1} style={styles.miniSub}>{sub}</Text>
-        </View>
+        <View style={styles.miniVideo}><VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="cover" nativeControls={false} allowsPictureInPicture /></View>
+        <View style={{ flex: 1, paddingRight: 6 }}><Text numberOfLines={1} style={styles.miniTitle}>{title}</Text><Text numberOfLines={1} style={styles.miniSub}>{sub}</Text></View>
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
       </Pressable>
@@ -1131,8 +977,6 @@ function MiniPlayer() {
     </View>
   );
 }
-
-/* ================= SCREENS ================= */
 
 function LoginScreen() {
   const { setSession, resetLocal } = useApp();
@@ -1151,10 +995,8 @@ function LoginScreen() {
 
   async function doTest() {
     setStatus("Verifico…"); setErr("");
-    try { const r = await testServer(server); setStatus("✓ " + r.name + " · v" + r.version); }
-    catch (e: any) { setStatus(e.message); }
+    try { const r = await testServer(server); setStatus("✓ " + r.name + " · v" + r.version); } catch (e: any) { setStatus(e.message); }
   }
-
   async function doLogin() {
     setBusy(true); setErr("");
     try {
@@ -1167,7 +1009,6 @@ function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.screen}>
-      <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.logo}>NOVA</Text>
         <Text style={styles.logoSub}>for Jellyfin</Text>
@@ -1175,29 +1016,20 @@ function LoginScreen() {
           <Text style={styles.loginCardTitle}>Accedi</Text>
           <Text style={styles.loginCardSub}>Connettiti al tuo server Jellyfin.</Text>
           <Text style={styles.label}>Server</Text>
-          <TextInput value={server} onChangeText={setServer} placeholder="http://192.168.1.10:8096"
-            placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
+          <TextInput value={server} onChangeText={setServer} placeholder="http://192.168.1.10:8096" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
           <Pressable onPress={doTest} style={styles.testButton}><Text style={styles.testButtonText}>Test connessione</Text></Pressable>
           {!!status && <Text style={[styles.status, status.startsWith("✓") ? styles.ok : styles.bad]}>{status}</Text>}
           <Text style={styles.label}>Utente</Text>
           <TextInput value={user} onChangeText={setUser} autoCapitalize="none" autoCorrect={false} style={styles.input} />
           <Text style={styles.label}>Password</Text>
           <View style={styles.passWrap}>
-            <TextInput value={pass} onChangeText={setPass} secureTextEntry={!showPass}
-              autoCapitalize="none" autoCorrect={false} autoComplete="off" importantForAutofill="no"
-              style={[styles.input, { paddingRight: 50 }]} />
-            <Pressable onPress={() => setShowPass(v => !v)} style={styles.eyeButton}>
-              <Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} />
-            </Pressable>
+            <TextInput value={pass} onChangeText={setPass} secureTextEntry={!showPass} autoCapitalize="none" autoCorrect={false} autoComplete="off" importantForAutofill="no" style={[styles.input, { paddingRight: 50 }]} />
+            <Pressable onPress={() => setShowPass(v => !v)} style={styles.eyeButton}><Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} /></Pressable>
           </View>
           {!!err && <Text style={styles.bad}>{err}</Text>}
-          <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}>
-            <Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text>
-          </Pressable>
+          <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}><Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text></Pressable>
           <View style={styles.divider}><View style={styles.dividerLine} /><Text style={styles.dividerText}>oppure</Text><View style={styles.dividerLine} /></View>
-          <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>Esplora la demo</Text>
-          </Pressable>
+          <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Esplora la demo</Text></Pressable>
           <Pressable onPress={resetLocal} style={styles.fixButton}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
         </View>
       </ScrollView>
@@ -1224,10 +1056,7 @@ function TopBar() {
           <Pressable style={styles.profileMenu} onPress={() => {}}>
             <View style={styles.profileHead}>
               <Face size={54} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.profileName}>{session?.user || "Matteo"}</Text>
-                <Text style={styles.muted} numberOfLines={1}>{session?.mode === "demo" ? "Modalità demo" : session?.server}</Text>
-              </View>
+              <View style={{ flex: 1 }}><Text style={styles.profileName}>{session?.user || "Matteo"}</Text><Text style={styles.muted} numberOfLines={1}>{session?.mode === "demo" ? "Modalità demo" : session?.server}</Text></View>
             </View>
             <MenuItem label="Impostazioni" onPress={() => { close(); navigationRef.navigate("Settings"); }} />
             <MenuItem label="Ricarica libreria" onPress={() => { close(); reloadLibrary(); }} />
@@ -1264,56 +1093,29 @@ function HomeScreen() {
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" />
       <TopBar />
       <ScrollView showsVerticalScrollIndicator={false}>
         <View style={styles.hero}>
-          {featured.backdrop ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-            : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + featured.hue + ",55%,22%)" }]} />}
+          {featured.backdrop ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + featured.hue + ",55%,22%)" }]} />}
           <LinearGradient colors={["rgba(8,8,11,0.15)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
           <View style={styles.heroContent}>
-            <View style={styles.heroKickerRow}>
-              <Text style={styles.heroKicker}>CONSIGLIATO PER TE</Text>
-              <Pressable onPress={reshuffle} style={styles.shuffleBtn}><Ionicons name="shuffle" size={16} color={C.muted} /></Pressable>
-            </View>
+            <View style={styles.heroKickerRow}><Text style={styles.heroKicker}>CONSIGLIATO PER TE</Text><Pressable onPress={reshuffle} style={styles.shuffleBtn}><Ionicons name="shuffle" size={16} color={C.muted} /></Pressable></View>
             <Text style={styles.heroTitle}>{featured.title}</Text>
-            <View style={styles.metaRow}>
-              <Text style={styles.match}>{featured.match}% compatibile</Text>
-              <Text style={styles.metaText}>{featured.year}</Text>
-              <Text style={styles.badge}>HD</Text>
-            </View>
+            <View style={styles.metaRow}><Text style={styles.match}>{featured.match}% compatibile</Text><Text style={styles.metaText}>{featured.year}</Text><Text style={styles.badge}>HD</Text></View>
             <Text numberOfLines={3} style={styles.heroDesc}>{featured.overview}</Text>
             <View style={styles.actions}>
-              <Pressable onPress={() => P.open(featured)} style={styles.whiteButton}>
-                <Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text>
-              </Pressable>
-              <Pressable onPress={() => goDetail(featured.id)} style={styles.ghostButton}>
-                <Ionicons name="information-circle-outline" size={22} color="#fff" /><Text style={styles.ghostButtonText}>Info</Text>
-              </Pressable>
+              <Pressable onPress={() => P.open(featured)} style={styles.whiteButton}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text></Pressable>
+              <Pressable onPress={() => goDetail(featured.id)} style={styles.ghostButton}><Ionicons name="information-circle-outline" size={22} color="#fff" /><Text style={styles.ghostButtonText}>Info</Text></Pressable>
             </View>
           </View>
         </View>
         <View style={styles.rows}>
-          <Row title="Continua a guardare" data={continueData} keyExtractor={(x: any) => x.ep?.id || x.item.id}
-            renderItem={({ item: x }: any) => (
-              <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW}
-                progress={progress[x.ep?.id || x.item.id]}
-                onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />
-            )} />
-          <Row title="Prossimi episodi" data={nextUp} keyExtractor={(x: any) => x.ep.id}
-            renderItem={({ item: x }: any) => (
-              <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW}
-                progress={progress[x.ep.id]}
-                onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />
-            )} />
-          <Row title="La tua lista" data={myList} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
-          <Row title="Aggiunti di recente" data={[...items].sort((a: any, b: any) => b.added - a.added)} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
-          <Row title="Film" data={items.filter((i: any) => i.type === "movie")} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
-          <Row title="Serie TV" data={items.filter((i: any) => i.type === "series")} keyExtractor={(x: any) => x.id}
-            renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Continua a guardare" data={continueData} keyExtractor={(x: any) => x.ep?.id || x.item.id} renderItem={({ item: x }: any) => <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW} progress={progress[x.ep?.id || x.item.id]} onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />} />
+          <Row title="Prossimi episodi" data={nextUp} keyExtractor={(x: any) => x.ep.id} renderItem={({ item: x }: any) => <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW} progress={progress[x.ep.id]} onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />} />
+          <Row title="La tua lista" data={myList} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Aggiunti di recente" data={[...items].sort((a: any, b: any) => b.added - a.added)} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Film" data={items.filter((i: any) => i.type === "movie")} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Serie TV" data={items.filter((i: any) => i.type === "series")} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
         </View>
       </ScrollView>
     </View>
@@ -1326,18 +1128,9 @@ function SearchScreen() {
   const res = q.trim() ? items.filter((i: any) => i.title.toLowerCase().includes(q.toLowerCase()) || i.genres.join(" ").toLowerCase().includes(q.toLowerCase())) : [];
   return (
     <SafeAreaView style={styles.screen}>
-      <View style={styles.searchHeader}>
-        <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
-        <TextInput autoFocus value={q} onChangeText={setQ} placeholder="Cerca titoli, generi…" placeholderTextColor={C.faint}
-          autoCapitalize="none" autoCorrect={false} style={styles.searchInput} />
-      </View>
+      <View style={styles.searchHeader}><IconButton name="arrow-back" onPress={() => navigationRef.goBack()} /><TextInput autoFocus value={q} onChangeText={setQ} placeholder="Cerca titoli, generi…" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} style={styles.searchInput} /></View>
       <FlatList data={res} keyExtractor={(i: any) => i.id} numColumns={3} contentContainerStyle={styles.grid}
-        renderItem={({ item }) => (
-          <View style={styles.gridItem}>
-            <MediaCard item={item} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: item.id })} />
-            <Text numberOfLines={1} style={styles.gridTitle}>{item.title}</Text>
-          </View>
-        )}
+        renderItem={({ item }) => <View style={styles.gridItem}><MediaCard item={item} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: item.id })} /><Text numberOfLines={1} style={styles.gridTitle}>{item.title}</Text></View>}
         ListEmptyComponent={<View style={styles.center}><Ionicons name="search" size={48} color={C.faint} /><Text style={styles.emptyTitle}>Cerca nella libreria</Text></View>} />
     </SafeAreaView>
   );
@@ -1358,7 +1151,6 @@ function DetailScreen({ route }: any) {
   }, [item?.id]);
 
   if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
-
   const cur = seasons.find((s: any) => s.n === season) || seasons[0];
   const ep = item.type === "series" ? targetEpisode(seasons, progress) : null;
   const resume = ep ? progress[ep.id]?.position || 0 : progress[item.id]?.position || 0;
@@ -1368,25 +1160,16 @@ function DetailScreen({ route }: any) {
   return (
     <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
       <View style={styles.detailHero}>
-        {item.backdrop ? <ImageBackground source={{ uri: item.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-          : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + item.hue + ",55%,22%)" }]} />}
+        {item.backdrop ? <ImageBackground source={{ uri: item.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + item.hue + ",55%,22%)" }]} />}
         <LinearGradient colors={["rgba(8,8,11,0.2)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
         <SafeAreaView style={styles.detailHeroContent}>
           <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
           <Text style={styles.detailTitle}>{item.title}</Text>
-          <View style={styles.metaRow}>
-            <Text style={styles.match}>{item.match}% compatibile</Text>
-            <Text style={styles.metaText}>{item.year}</Text>
-            <Text style={styles.badge}>{item.rating}</Text>
-          </View>
+          <View style={styles.metaRow}><Text style={styles.match}>{item.match}% compatibile</Text><Text style={styles.metaText}>{item.year}</Text><Text style={styles.badge}>{item.rating}</Text></View>
           <Text numberOfLines={4} style={styles.heroDesc}>{item.overview}</Text>
           <View style={styles.actions}>
-            <Pressable onPress={() => P.open(item, ep)} style={styles.whiteButton}>
-              <Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text>
-            </Pressable>
-            <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, inList && styles.roundOn]}>
-              <Ionicons name={inList ? "checkmark" : "add"} size={26} color={inList ? C.green : "#fff"} />
-            </Pressable>
+            <Pressable onPress={() => P.open(item, ep)} style={styles.whiteButton}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text></Pressable>
+            <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={26} color={inList ? C.green : "#fff"} /></Pressable>
           </View>
           {inList && <Text style={styles.inListNote}>Nella tua lista</Text>}
         </SafeAreaView>
@@ -1398,11 +1181,7 @@ function DetailScreen({ route }: any) {
           <>
             <View style={styles.seasonHeader}><Text style={styles.sectionTitle}>Episodi</Text>{loading && <ActivityIndicator color={C.red} />}</View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
-              {seasons.map((s: any) => (
-                <Pressable key={s.n} onPress={() => setSeason(s.n)} style={[styles.seasonChip, cur?.n === s.n && styles.seasonChipOn]}>
-                  <Text style={[styles.seasonText, cur?.n === s.n && styles.seasonTextOn]}>{s.name}</Text>
-                </Pressable>
-              ))}
+              {seasons.map((s: any) => <Pressable key={s.n} onPress={() => setSeason(s.n)} style={[styles.seasonChip, cur?.n === s.n && styles.seasonChipOn]}><Text style={[styles.seasonText, cur?.n === s.n && styles.seasonTextOn]}>{s.name}</Text></Pressable>)}
             </ScrollView>
             {(cur?.episodes || []).map((e: any) => {
               const p = progress[e.id];
@@ -1410,32 +1189,15 @@ function DetailScreen({ route }: any) {
               return (
                 <Pressable key={e.id} onPress={() => P.open(item, e)} style={styles.episode}>
                   <Text style={styles.episodeNum}>{e.episode}</Text>
-                  <View style={styles.episodeThumb}>
-                    <Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} />
-                    {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.episodeTitle}>{e.title}</Text>
-                    <Text numberOfLines={2} style={styles.episodeDesc}>{e.overview}</Text>
-                  </View>
+                  <View style={styles.episodeThumb}><Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} />{pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}</View>
+                  <View style={{ flex: 1 }}><Text style={styles.episodeTitle}>{e.title}</Text><Text numberOfLines={2} style={styles.episodeDesc}>{e.overview}</Text></View>
                   <Text style={styles.faint}>{fmt(e.duration)}</Text>
                 </Pressable>
               );
             })}
           </>
         )}
-        {!!similar.length && (
-          <>
-            <Text style={styles.sectionTitle}>Altri titoli simili</Text>
-            <View style={styles.similarGrid}>
-              {similar.map((x: any) => (
-                <View key={x.id} style={styles.similarItem}>
-                  <MediaCard item={x} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: x.id })} />
-                </View>
-              ))}
-            </View>
-          </>
-        )}
+        {!!similar.length && (<><Text style={styles.sectionTitle}>Altri titoli simili</Text><View style={styles.similarGrid}>{similar.map((x: any) => <View key={x.id} style={styles.similarItem}><MediaCard item={x} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: x.id })} /></View>)}</View></>)}
       </View>
     </ScrollView>
   );
@@ -1445,43 +1207,26 @@ function Choice({ label, value, options, onChange }: any) {
   return (
     <View style={styles.settingBlock}>
       <Text style={styles.settingLabel}>{label}</Text>
-      <View style={styles.choiceWrap}>
-        {options.map((o: any) => (
-          <Pressable key={o[0]} onPress={() => onChange(o[0])} style={[styles.choice, String(value) === String(o[0]) && styles.choiceOn]}>
-            <Text style={[styles.choiceText, String(value) === String(o[0]) && styles.choiceTextOn]}>{o[1]}</Text>
-          </Pressable>
-        ))}
-      </View>
+      <View style={styles.choiceWrap}>{options.map((o: any) => <Pressable key={o[0]} onPress={() => onChange(o[0])} style={[styles.choice, String(value) === String(o[0]) && styles.choiceOn]}><Text style={[styles.choiceText, String(value) === String(o[0]) && styles.choiceTextOn]}>{o[1]}</Text></Pressable>)}</View>
     </View>
   );
 }
 
 function Toggle({ label, value, onToggle }: any) {
-  return (
-    <Pressable onPress={onToggle} style={styles.settingRow}>
-      <Text style={styles.settingLabel}>{label}</Text>
-      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
-    </Pressable>
-  );
+  return <Pressable onPress={onToggle} style={styles.settingRow}><Text style={styles.settingLabel}>{label}</Text><View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View></Pressable>;
 }
 
 function SettingsScreen() {
   const { session, settings, setSettings, reloadLibrary, resetLocal, setSession } = useApp();
   const dim = useWindowDimensions();
   const twoCol = dim.width > 700;
-
   async function doTest() {
     if (session.mode === "demo") return Alert.alert("Demo", "Sei in modalità demo.");
-    try { const r = await testServer(session.server); Alert.alert("Server OK", r.name + " · v" + r.version); }
-    catch (e: any) { Alert.alert("Test fallito", e.message); }
+    try { const r = await testServer(session.server); Alert.alert("Server OK", r.name + " · v" + r.version); } catch (e: any) { Alert.alert("Test fallito", e.message); }
   }
-
   return (
     <SafeAreaView style={styles.screen}>
-      <View style={styles.searchHeader}>
-        <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
-        <Text style={styles.pageTitle}>Impostazioni</Text>
-      </View>
+      <View style={styles.searchHeader}><IconButton name="arrow-back" onPress={() => navigationRef.goBack()} /><Text style={styles.pageTitle}>Impostazioni</Text></View>
       <ScrollView contentContainerStyle={[styles.settingsScroll, twoCol && styles.settingsScrollWide]} keyboardShouldPersistTaps="handled">
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Riproduzione</Text>
@@ -1505,9 +1250,7 @@ function SettingsScreen() {
         <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
           <Text style={styles.sectionTitle}>Interfaccia</Text>
           <Text style={styles.settingLabel}>Dimensione locandine: {settings.posterSize}px</Text>
-          <Slider minimumValue={120} maximumValue={220} step={5} value={settings.posterSize}
-            minimumTrackTintColor={C.red} maximumTrackTintColor={C.surface3} thumbTintColor={C.red}
-            onValueChange={v => setSettings({ ...settings, posterSize: v })} />
+          <Slider minimumValue={120} maximumValue={220} step={5} value={settings.posterSize} minimumTrackTintColor={C.red} maximumTrackTintColor={C.surface3} thumbTintColor={C.red} onValueChange={v => setSettings({ ...settings, posterSize: v })} />
           <Toggle label="Locandine orizzontali (Continua / Prossimi)" value={settings.thumbWide} onToggle={() => setSettings({ ...settings, thumbWide: !settings.thumbWide })} />
           <Toggle label="Animazioni" value={settings.animations} onToggle={() => setSettings({ ...settings, animations: !settings.animations })} />
           <Toggle label="Barre di progresso" value={settings.progressBars} onToggle={() => setSettings({ ...settings, progressBars: !settings.progressBars })} />
@@ -1581,8 +1324,7 @@ export default function App() {
   useEffect(() => { if (session) reloadLibrary(); }, [session?.token, session?.mode]);
 
   const reshuffle = () => setFeatured(pickFeatured(items, progress, epMap, list));
-  const saveProgress = (id: string, pos: number, dur: number) =>
-    setProgress((p: any) => ({ ...p, [id]: { position: pos, duration: dur, updated: Date.now() } }));
+  const saveProgress = (id: string, pos: number, dur: number) => setProgress((p: any) => ({ ...p, [id]: { position: pos, duration: dur, updated: Date.now() } }));
   const toggleList = (id: string) => setList(l => (l.includes(id) ? l.filter(x => x !== id) : [...l, id]));
 
   async function resetLocal() {
@@ -1601,6 +1343,7 @@ export default function App() {
       <AppCtx.Provider value={value}>
         <PlayerProvider>
           <View style={{ flex: 1, backgroundColor: C.bg }}>
+            <AppStatusBar />
             {!session ? <LoginScreen /> : (
               <NavigationContainer ref={navigationRef} theme={navTheme}>
                 <Stack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
@@ -1743,6 +1486,7 @@ const styles = StyleSheet.create({
   centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -30, marginTop: -30, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 30 },
   centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -36, marginTop: -36, width: 72, height: 72, alignItems: "center", justifyContent: "center", zIndex: 25 },
   centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
+  playerTitle: { color: "#fff", fontWeight: "800", fontSize: 15 },
   playerTime: { color: "#fff", fontWeight: "700", fontSize: 12 },
   hdButton: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
   hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 18, alignItems: "center", justifyContent: "center" },
