@@ -57,7 +57,7 @@ jobs:
 
       - name: Remove UTF-8 BOM from source files
         run: |
-          find nova -type f \( -name '*.json' -o -name '*.js' -o -name '*.cjs' -o -name '*.mjs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.svg' \) \
+          find nova -type f \( -name '*.json' -o -name '*.js' -o -name '*.cjs' -o -name '*.mjs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.svg' \)
             -not -path '*/node_modules/*' -print0 \
           | xargs -0 -r sed -i '1s/^\xEF\xBB\xBF//'
 
@@ -73,7 +73,7 @@ jobs:
         working-directory: nova
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
-      - name: Verify required packages are present
+      - name: Verify required packages
         working-directory: nova
         run: |
           missing=0
@@ -115,13 +115,18 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: List built APKs
-        run: ls -la nova/android/app/build/outputs/apk/release/
+      - name: Build DEBUG APK (diagnostica)
+        working-directory: nova/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
 
-      - name: Upload APK
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
           name: nova-apk
-          path: nova/android/app/build/outputs/apk/release/app-release.apk
+          path: |
+            nova/android/app/build/outputs/apk/release/app-release.apk
+            nova/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
