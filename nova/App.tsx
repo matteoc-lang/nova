@@ -17,7 +17,7 @@ import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
 import { LinearGradient } from "expo-linear-gradient";
 
-/* ---- Crash logger: salva l'errore fatale e lo mostra al prossimo avvio ---- */
+/* ---- Crash logger: intercetta errori fatali e li salva per il prossimo avvio ---- */
 (function installCrashLogger() {
   const g: any = globalThis as any;
   if (!g.ErrorUtils || typeof g.ErrorUtils.setGlobalHandler !== "function") return;
@@ -26,7 +26,7 @@ import { LinearGradient } from "expo-linear-gradient";
     try {
       AsyncStorage.setItem("nova.lastcrash", JSON.stringify({
         msg: String((error && error.message) || error),
-        stack: String((error && error.stack) || "").slice(0, 1200),
+        stack: String((error && error.stack) || "").slice(0, 1500),
         fatal: !!isFatal,
         t: Date.now()
       }));
@@ -42,7 +42,7 @@ class CrashBoundary extends React.Component<{ children: any }, { error: any }> {
     try {
       AsyncStorage.setItem("nova.lastcrash", JSON.stringify({
         msg: String((error && error.message) || error),
-        stack: String((error && error.stack) || "").slice(0, 1200),
+        stack: String((error && error.stack) || "").slice(0, 1500),
         fatal: true, t: Date.now()
       }));
     } catch {}
@@ -53,7 +53,7 @@ class CrashBoundary extends React.Component<{ children: any }, { error: any }> {
         <View style={{ flex: 1, backgroundColor: "#08080b", justifyContent: "center", padding: 24 }}>
           <Text style={{ color: "#e50914", fontWeight: "900", fontSize: 20, marginBottom: 12 }}>NOVA: errore di rendering</Text>
           <Text style={{ color: "#f6f5f2", fontSize: 13 }}>{String(this.state.error.message || this.state.error)}</Text>
-          <Text style={{ color: "#70707c", fontSize: 11, marginTop: 14 }}>{String(this.state.error.stack || "").slice(0, 700)}</Text>
+          <Text style={{ color: "#70707c", fontSize: 11, marginTop: 14 }}>{String(this.state.error.stack || "").slice(0, 900)}</Text>
         </View>
       );
     }
@@ -105,7 +105,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="4.2.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="4.3.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -1461,6 +1461,30 @@ function SettingsScreen() {
   );
 }
 
+/* Schermata dedicata al crash registrato: resta visibile finché non la chiudi tu */
+function CrashReportScreen({ info, onDismiss, onClear }: any) {
+  return (
+    <SafeAreaView style={styles.screen}>
+      <ScrollView contentContainerStyle={{ padding: 20, gap: 14 }}>
+        <Text style={{ color: C.red, fontSize: 22, fontWeight: "900" }}>Crash registrato</Text>
+        <Text style={{ color: C.muted, fontSize: 12 }}>
+          {new Date(info.t).toLocaleString()} · {" "}
+          {info.fatal ? "errore fatale" : "errore di rendering"}
+        </Text>
+        <View style={styles.statsInline}>
+          <Text style={{ color: C.text, fontSize: 14, fontWeight: "800", marginBottom: 6 }}>{info.msg}</Text>
+          <Text style={{ color: C.muted, fontSize: 11, lineHeight: 16 }}>{info.stack}</Text>
+        </View>
+        <Text style={{ color: C.faint, fontSize: 12 }}>
+          Fai uno screenshot a questa schermata e mandamelo: contiene messaggio e stack trace esatti.
+        </Text>
+        <Pressable onPress={onDismiss} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Avvia NOVA comunque</Text></Pressable>
+        <Pressable onPress={onClear} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Cancella registro e avvia</Text></Pressable>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
 export default function App() {
   const [session, setSessionState] = useState<any>(null);
   const [booting, setBooting] = useState(true);
@@ -1472,6 +1496,7 @@ export default function App() {
   const [list, setList] = useState<string[]>([]);
   const [settings, setSettings] = useState<any>(defaultSettings);
   const [featured, setFeatured] = useState<any>(null);
+  const [crashInfo, setCrashInfo] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -1485,27 +1510,14 @@ export default function App() {
         if (pr) setProgress(JSON.parse(pr));
         if (li) setList(JSON.parse(li));
       } catch {}
-      setBooting(false);
-    })();
-  }, []);
-
-  useEffect(() => {
-    (async () => {
       try {
         const raw = await AsyncStorage.getItem("nova.lastcrash");
-        if (!raw) return;
-        const c = JSON.parse(raw);
-        if (c && c.t && Date.now() - c.t < 12 * 3600 * 1000) {
-          Alert.alert(
-            "Crash precedente rilevato",
-            (c.msg || "errore sconosciuto") + "\n\n" + String(c.stack || "").slice(0, 500),
-            [
-              { text: "Ignora" },
-              { text: "Cancella registro", style: "destructive", onPress: () => AsyncStorage.removeItem("nova.lastcrash") }
-            ]
-          );
+        if (raw) {
+          const c = JSON.parse(raw);
+          if (c && c.t && Date.now() - c.t < 24 * 3600 * 1000) setCrashInfo(c);
         }
       } catch {}
+      setBooting(false);
     })();
   }, []);
 
@@ -1542,12 +1554,24 @@ export default function App() {
     await SecureStore.deleteItemAsync("nova.session");
     const keys = await AsyncStorage.getAllKeys();
     await AsyncStorage.multiRemove(keys.filter(k => k.startsWith("nova.")));
-    setSessionState(null); setItems([]); setEpMap({}); setNextUp([]); setProgress({}); setList([]); setSettings(defaultSettings); setFeatured(null);
+    setSessionState(null); setItems([]); setEpMap({}); setNextUp([]); setProgress({}); setList([]); setSettings(defaultSettings); setFeatured(null); setCrashInfo(null);
   }
 
   const value = { session, setSession, items, epMap, nextUp, progress, saveProgress, list, toggleList, settings, setSettings, libLoading, reloadLibrary, resetLocal, featured, reshuffle };
 
   if (booting) return <SafeAreaProvider><SafeAreaView style={styles.center}><Text style={styles.logo}>NOVA</Text><ActivityIndicator color={C.red} /></SafeAreaView></SafeAreaProvider>;
+
+  if (crashInfo) {
+    return (
+      <SafeAreaProvider>
+        <CrashReportScreen
+          info={crashInfo}
+          onDismiss={() => setCrashInfo(null)}
+          onClear={() => { AsyncStorage.removeItem("nova.lastcrash"); setCrashInfo(null); }}
+        />
+      </SafeAreaProvider>
+    );
+  }
 
   return (
     <SafeAreaProvider>
