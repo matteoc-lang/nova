@@ -4,9 +4,10 @@ import {
   Modal, PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Text,
   TextInput, View, useWindowDimensions
 } from "react-native";
-import { useEventListener } from "expo";
+import { useEventListener, requireNativeModule } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
 import * as NavigationBar from "expo-navigation-bar";
+import * as Notif from "expo-notifications";
 import { NavigationContainer, DefaultTheme, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,6 +17,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
 import { LinearGradient } from "expo-linear-gradient";
+
+/* Modulo nativo locale per PiP (API Android pubbliche). Se non c'e, tutto degrada con grazia. */
+let NovaPip: any = null;
+try { NovaPip = requireNativeModule("NovaPip"); } catch {}
 
 const C = {
   bg: "#08080b", surface: "#15151c", surface2: "#1d1d26", surface3: "#282833",
@@ -30,12 +35,6 @@ const PlayerCtx = createContext<any>(null);
 const useApp = () => useContext(AppCtx);
 const usePlayer = () => useContext(PlayerCtx);
 const navTheme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: C.bg, card: C.bg, text: C.text, primary: C.red, border: C.line } };
-
-async function enterPip(p: any): Promise<boolean> {
-  try { if (p && typeof p.enterPictureInPicture === "function") { await p.enterPictureInPicture(); return true; } } catch {}
-  try { if (p && typeof p.startPictureInPicture === "function") { await p.startPictureInPicture(); return true; } } catch {}
-  return false;
-}
 
 const defaultSettings = {
   streamMode: "auto", quality: "auto", audioLang: "it", subLang: "it", autoSub: true,
@@ -61,7 +60,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="5.0.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="6.0.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -373,4 +372,1408 @@ function demoLibrary() {
   return { items, map, epMap, progress: { neon: { position: 412, duration: 888, updated: now - 2 * day }, "cieli-1-3": { position: 300, duration: 888, updated: now - day } }, nextUp: [{ item: map.cieli, ep: epMap["cieli-1-4"] }] };
 }
 
-const isWatched = (p: any) => p && p.duration > 0 && p.position / p.duration >= 0.92
+const isWatched = (p: any) => p && p.duration > 0 && p.position / p.duration >= 0.92;
+
+function findNextEpisode(seasons: any[], ep: any) {
+  if (!ep) return null;
+  for (let i = 0; i < seasons.length; i++) {
+    const idx = seasons[i].episodes.findIndex((e: any) => e.id === ep.id);
+    if (idx >= 0) return seasons[i].episodes[idx + 1] || seasons[i + 1]?.episodes?.[0] || null;
+  }
+  return null;
+}
+
+function targetEpisode(seasons: any[], progress: any) {
+  for (const s of seasons || []) for (const e of s.episodes || []) {
+    const p = progress[e.id];
+    if (p && p.position > 5 && !isWatched(p)) return e;
+  }
+  return seasons?.[0]?.episodes?.[0] || null;
+}
+
+function pickFeatured(items: any[], progress: any, epMap: any, list: string[]) {
+  if (!items.length) return null;
+  const w: any = {}; let history = 0;
+  const bump = (it: any, amount: number) => { if (!it) return; history++; (it.genres || []).forEach((g: string) => (w[g] = (w[g] || 0) + amount)); };
+  items.forEach((it: any) => {
+    const p = progress[it.id];
+    if (p && p.duration > 0 && p.position / p.duration > 0.08) bump(it, 2);
+    if (list.includes(it.id)) bump(it, 1);
+  });
+  Object.keys(progress).forEach(id => { const ep = epMap[id]; if (ep) bump(items.find((i: any) => i.id === ep.seriesId), 2); });
+  if (!history) return items[Math.floor(Math.random() * items.length)];
+  const scored = items.map((it: any) => {
+    let s = 0; (it.genres || []).forEach((g: string) => (s += w[g] || 0));
+    s += (it.match || 80) / 25;
+    if (isWatched(progress[it.id])) s -= 8;
+    return { it, s };
+  }).sort((a: any, b: any) => b.s - a.s);
+  const pool = scored.slice(0, 8);
+  return pool[Math.floor(Math.random() * pool.length)].it;
+}
+
+function IconButton({ name, onPress, size = 22, style, active }: any) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.iconButton, (pressed || active) && styles.pressed, style]}>
+      <Ionicons name={name} size={size} color={C.text} />
+    </Pressable>
+  );
+}
+
+function Face({ size = 36 }: any) {
+  return <View style={[styles.face, { width: size, height: size, borderRadius: size * 0.22 }]}><Ionicons name="happy" size={size * 0.72} color="#fff" /></View>;
+}
+
+function Poster({ item, wide, ep, progress }: any) {
+  const primary = wide ? (ep?.thumb || item.backdrop || item.poster) : item.poster;
+  const fallback = item.backdrop || item.poster;
+  const [uri, setUri] = useState(primary);
+  useEffect(() => { setUri(primary); }, [primary]);
+  const p = progress;
+  const pct = p && p.duration ? Math.max(0, Math.min(100, (p.position / p.duration) * 100)) : 0;
+  return (
+    <View style={[styles.poster, wide ? styles.posterWide : styles.posterTall]}>
+      {uri ? <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => { if (uri !== fallback) setUri(fallback); }} />
+        : <View style={[StyleSheet.absoluteFill, styles.posterFallback, { backgroundColor: "hsl(" + (item.hue || 210) + ",55%,22%)" }]}><Text style={styles.posterFallbackTitle}>{item.title}</Text></View>}
+      {!!ep && <View style={styles.epBadge}><Text style={styles.epBadgeText}>S{ep.season} · E{ep.episode}</Text></View>}
+      {pct > 0 && <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pct + "%" }]} /></View>}
+      {wide && <View style={styles.wideLabel}><Text numberOfLines={1} style={styles.wideLabelTitle}>{ep ? ep.title : item.title}</Text>{!!ep && <Text numberOfLines={1} style={styles.wideLabelSub}>{item.title}</Text>}</View>}
+    </View>
+  );
+}
+
+function MediaCard({ item, ep, wide, onPress, onLongPress, progress, width }: any) {
+  return (
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={350} style={({ pressed }) => [styles.card, { width }, pressed && styles.cardPressed]}>
+      <Poster item={item} ep={ep} wide={wide} progress={progress} />
+    </Pressable>
+  );
+}
+
+function Row({ title, data, renderItem, keyExtractor }: any) {
+  if (!data || !data.length) return null;
+  return (
+    <View style={styles.row}>
+      <Text style={styles.rowTitle}>{title}</Text>
+      <FlatList horizontal data={data} keyExtractor={keyExtractor} renderItem={renderItem} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rowContent} ItemSeparatorComponent={() => <View style={{ width: 10 }} />} />
+    </View>
+  );
+}
+
+function MenuItem({ label, value, selected, disabled, onPress }: any) {
+  return (
+    <Pressable onPress={disabled ? undefined : onPress} style={[styles.menuItem, disabled && { opacity: 0.45 }]}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
+    </Pressable>
+  );
+}
+
+function MenuToggle({ label, value, onToggle }: any) {
+  return (
+    <Pressable onPress={onToggle} style={styles.menuItem}>
+      <Text style={styles.menuItemText}>{label}</Text>
+      <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
+    </Pressable>
+  );
+}
+
+function MenuHeader({ title, onBack, onClose }: any) {
+  return (
+    <View style={styles.menuHeader}>
+      <IconButton name="chevron-back" size={20} onPress={onBack} />
+      <Text style={styles.menuHeaderText}>{title}</Text>
+      <View style={{ flex: 1 }} />
+      <IconButton name="close" size={20} onPress={onClose} />
+    </View>
+  );
+}
+
+function AppStatusBar() {
+  const P = usePlayer();
+  return <StatusBar hidden={P.mode === "full"} barStyle="light-content" backgroundColor="transparent" translucent />;
+}
+
+function PlayerProvider({ children }: any) {
+  const { session, settings, saveProgress, progress } = useApp();
+  const player = useVideoPlayer(null, p => { p.loop = false; });
+
+  const [mode, setMode] = useState<"closed" | "full" | "mini" | "pip">("closed");
+  const [item, setItem] = useState<any>(null);
+  const [episode, setEpisode] = useState<any>(null);
+  const [info, setInfo] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [error, setError] = useState("");
+  const [playing, setPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [scrubbing, setScrubbing] = useState(false);
+  const [scrub, setScrub] = useState(0);
+  const [cues, setCues] = useState<any[]>([]);
+  const [subIndex, setSubIndex] = useState<number | null>(null);
+  const [subLoading, setSubLoading] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [ended, setEnded] = useState(false);
+  const [nextEp, setNextEp] = useState<any>(null);
+  const [videoSize, setVideoSize] = useState({ w: 16, h: 9 });
+  const [landscape, setLandscape] = useState(false);
+  const [controls, setControls] = useState(true);
+  const [menu, setMenu] = useState<string | null>(null);
+  const [fit, setFit] = useState<"contain" | "cover">("contain");
+
+  const baseOffset = useRef(0);
+  const pendingSeek = useRef<number | null>(null);
+  const seekLock = useRef(0);
+  const scrubbingRef = useRef(false);
+  const finishedRef = useRef(false);
+  const retried = useRef(false);
+  const lastSave = useRef(0);
+  const positionRef = useRef(0);
+  const infoRef = useRef<any>(null);
+  const optsRef = useRef<any>({});
+  const itemRef = useRef<any>(null);
+  const episodeRef = useRef<any>(null);
+  const subIndexRef = useRef<number | null>(null);
+  const subLangRef = useRef("");
+  const noticeTimer = useRef<any>(null);
+  const playingRef = useRef(false);
+  const settingsRef = useRef(settings);
+  const modeRef = useRef(mode);
+  const pipReturn = useRef<"full" | "mini">("full");
+  const notifId = useRef<string | null>(null);
+
+  useEffect(() => { infoRef.current = info; }, [info]);
+  useEffect(() => { itemRef.current = item; }, [item]);
+  useEffect(() => { episodeRef.current = episode; }, [episode]);
+  useEffect(() => { positionRef.current = position; }, [position]);
+  useEffect(() => { subIndexRef.current = subIndex; }, [subIndex]);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+
+  useEffect(() => {
+    try { (player as any).timeUpdateEventInterval = 0.25; } catch {}
+    try { player.staysActiveInBackground = true; } catch {}
+    try { (player as any).showNowPlayingNotification = false; } catch {}
+  }, [player]);
+
+  useEffect(() => {
+    try {
+      (player as any).bufferOptions = {
+        preferredForwardBufferDuration: settings.fastStart ? 25 : 50,
+        minBufferForPlayback: settings.fastStart ? 1 : 5,
+        waitsForMinBufferDuration: !settings.fastStart,
+        prioritizeTimeOverSizeThresholds: true
+      };
+    } catch {}
+  }, [player, settings.fastStart]);
+
+  useEffect(() => {
+    try { player.playbackRate = settings.speed; } catch {}
+    try { player.loop = settings.loop; } catch {}
+    try { player.staysActiveInBackground = !!settings.background; } catch {}
+  }, [settings.speed, settings.loop, settings.background, player]);
+
+  useEffect(() => {
+    if (mode === "full") {
+      NavigationBar.setVisibilityAsync("hidden").catch(() => {});
+      NavigationBar.setBehaviorAsync("overlay-swipe").catch(() => {});
+    } else {
+      NavigationBar.setVisibilityAsync("visible").catch(() => {});
+    }
+    return () => { NavigationBar.setVisibilityAsync("visible").catch(() => {}); };
+  }, [mode]);
+
+  /* ---- Notifica nostra: tap apre NOVA, pulsanti media funzionanti ---- */
+  useEffect(() => {
+    (async () => {
+      try {
+        Notif.setNotificationHandler({
+          handleNotification: async () => ({ shouldShowBanner: false, shouldShowList: false, shouldPlaySound: false, shouldSetBadge: false })
+        });
+        await Notif.setNotificationChannelAsync("nova-player", {
+          name: "Riproduzione", importance: Notif.AndroidImportance.LOW,
+          lockscreenVisibility: Notif.AndroidNotificationVisibility.PUBLIC, bypassDnd: false
+        });
+        await Notif.setNotificationCategoryAsync("nova-player-actions", [
+          { identifier: "rew", buttonTitle: "-10s" },
+          { identifier: "play_pause", buttonTitle: "Play/Pausa" },
+          { identifier: "fwd", buttonTitle: "+10s" }
+        ]);
+        const perm = await Notif.getPermissionsAsync();
+        if (!perm.granted) await Notif.requestPermissionsAsync();
+      } catch {}
+    })();
+    const sub = Notif.addNotificationResponseReceivedListener(r => {
+      const a = r.actionIdentifier;
+      if (a === "play_pause") { try { if (playingRef.current) player.pause(); else player.play(); } catch {} }
+      else if (a === "fwd") { try { player.currentTime = positionRef.current + 10; } catch {} }
+      else if (a === "rew") { try { player.currentTime = Math.max(0, positionRef.current - 10); } catch {} }
+      else { setMode("full"); setControls(true); }
+    });
+    return () => sub.remove();
+  }, [player]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const openSession = mode !== "closed" && !!item;
+        if (!openSession) {
+          if (notifId.current) { await Notif.dismissNotificationAsync(notifId.current); notifId.current = null; }
+          return;
+        }
+        const id = await Notif.scheduleNotificationAsync({
+          content: {
+            title: episode ? episode.title : item.title,
+            body: episode ? item.title + " · S" + episode.season + ":E" + episode.episode : (item.year ? String(item.year) : "NOVA"),
+            channelId: "nova-player",
+            categoryIdentifier: "nova-player-actions",
+            sticky: true,
+            priority: Notif.AndroidNotificationPriority.LOW,
+            data: { nova: "player" }
+          },
+          trigger: null
+        });
+        if (notifId.current && notifId.current !== id) Notif.dismissNotificationAsync(notifId.current).catch(() => {});
+        notifId.current = id;
+      } catch {}
+    })();
+  }, [mode, item, episode, playing]);
+
+  /* ---- PiP reale: poll sullo stato dell'activity, niente ipotesi ---- */
+  useEffect(() => {
+    if (!NovaPip || mode === "closed") return;
+    const t = setInterval(() => {
+      let inPip = false;
+      try { inPip = !!NovaPip.isInPip(); } catch {}
+      if (inPip && modeRef.current !== "pip") { setMode("pip"); setMenu(null); }
+      else if (!inPip && modeRef.current === "pip") { setMode(pipReturn.current); setControls(true); }
+    }, 500);
+    return () => clearInterval(t);
+  }, [mode === "closed"]);
+
+  /* Auto-PiP quando premi home (Android 12+), solo se attivo e stai riproducendo */
+  useEffect(() => {
+    if (!NovaPip) return;
+    const on = !!settings.pip && playing && (mode === "full" || mode === "mini");
+    try { NovaPip.setAutoEnter(on); } catch {}
+  }, [settings.pip, playing, mode]);
+
+  useEffect(() => () => {
+    ScreenOrientation.unlockAsync().catch(() => {});
+    NavigationBar.setVisibilityAsync("visible").catch(() => {});
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+  }, []);
+
+  function flash(msg: string) {
+    setNotice(msg);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(""), 3000);
+  }
+
+  async function requestPip(ret?: "full" | "mini") {
+    if (!NovaPip) { flash("Modulo PiP assente in questa build"); return; }
+    pipReturn.current = ret || (modeRef.current === "mini" ? "mini" : "full");
+    let ok = false;
+    try { ok = !!NovaPip.enterPip(); } catch {}
+    if (!ok) flash("PiP non disponibile su questo dispositivo");
+  }
+
+  async function loadSubTrack(stream: any, silent = false) {
+    const inf = infoRef.current;
+    if (!inf || !stream) return;
+    if (session.mode === "demo") { if (!silent) flash("Nessun sottotitolo nella demo."); return; }
+    if (!isTextSub(stream)) { if (!silent) flash("Sottotitoli grafici (PGS): non supportati senza transcoding."); return; }
+    setSubLoading(true);
+    if (!silent) flash("Carico i sottotitoli… il video continua.");
+    try {
+      const raw = await fetchSubtitleText(session, inf.id, inf.mediaSourceId, stream.Index);
+      const parsed = parseSubtitles(raw);
+      if (!parsed.length) throw new Error("nessuna battuta leggibile");
+      setCues(parsed); setSubIndex(stream.Index);
+      subIndexRef.current = stream.Index; subLangRef.current = String(stream.Language || "");
+      if (!silent) flash("Sottotitoli: " + (stream.DisplayTitle || stream.Language || "attivi"));
+    } catch (e: any) {
+      setCues([]); setSubIndex(null); subIndexRef.current = null;
+      if (!silent) flash("Sottotitoli: " + (e.message || "errore"));
+    } finally { setSubLoading(false); }
+  }
+
+  async function load(opts: any = {}, itArg = itemRef.current, epArg = episodeRef.current, startAt = 0) {
+    if (!itArg || !session) return;
+    setLoading(true); setError(""); setEnded(false);
+    optsRef.current = { ...optsRef.current, ...opts };
+    seekLock.current = Date.now() + 1000;
+    try {
+      const inf = await getPlayback(session, epArg ? epArg.id : itArg.id, settingsRef.current, {
+        ...optsRef.current, startSeconds: startAt, demoUrl: epArg?.video || itArg.video, duration: epArg?.duration || itArg.duration
+      });
+      infoRef.current = inf; setInfo(inf);
+      setDuration(inf.duration || epArg?.duration || itArg.duration || 0);
+      baseOffset.current = inf.startOffset || 0;
+      pendingSeek.current = inf.hls ? null : startAt;
+      setPosition(startAt); positionRef.current = startAt;
+
+      const metaTitle = epArg ? String(epArg.title) : itArg.title;
+      const metaArtist = epArg ? itArg.title + " · S" + epArg.season + ":E" + epArg.episode : (itArg.year ? String(itArg.year) : "NOVA");
+      player.replace({ uri: inf.url, metadata: { title: metaTitle, artist: metaArtist, artwork: itArg.poster || itArg.backdrop } });
+
+      const s = settingsRef.current;
+      if (subIndexRef.current != null) {
+        const match = (inf.subs || []).find((x: any) => x.Index === subIndexRef.current) || (inf.subs || []).find((x: any) => String(x.Language || "") === subLangRef.current && isTextSub(x));
+        if (match) loadSubTrack(match, true); else { setCues([]); setSubIndex(null); subIndexRef.current = null; }
+      } else if (s.autoSub) {
+        const pref = (inf.subs || []).find((x: any) => String(x.Language || "").toLowerCase().startsWith(s.subLang) && isTextSub(x));
+        if (pref) loadSubTrack(pref, true);
+      }
+    } catch (e: any) { setError(e.message || "Errore di riproduzione."); setLoading(false); }
+  }
+
+  async function open(it: any, ep: any = null, startAt?: number) {
+    if (!it) return;
+    let e = ep;
+    if (it.type === "series" && !e) { try { const ss = await loadSeasons(session, it); e = targetEpisode(ss, progress); } catch {} }
+    setItem(it); itemRef.current = it; setEpisode(e); episodeRef.current = e;
+    setMode("full"); setStarted(false); setControls(true); setCues([]); setSubIndex(null);
+    subIndexRef.current = null; subLangRef.current = ""; finishedRef.current = false; retried.current = false; optsRef.current = {};
+    const id = e ? e.id : it.id;
+    const start = startAt != null ? startAt : (isWatched(progress[id]) ? 0 : (progress[id]?.position || 0));
+    await load({}, it, e, start);
+  }
+
+  function minimize() { setMode("mini"); setMenu(null); setLandscape(false); ScreenOrientation.unlockAsync().catch(() => {}); }
+  function expand() { setMode("full"); setControls(true); }
+  function close() {
+    try { player.pause(); } catch {}
+    if (infoRef.current) reportPlayback(session, "stop", infoRef.current, positionRef.current, true);
+    setMode("closed"); setMenu(null); setEnded(false); setCues([]); setSubIndex(null); subIndexRef.current = null;
+    ScreenOrientation.unlockAsync().catch(() => {}); setLandscape(false);
+    if (notifId.current) { Notif.dismissNotificationAsync(notifId.current).catch(() => {}); notifId.current = null; }
+  }
+
+  useEventListener(player, "statusChange", ({ status, error: err }: any) => {
+    if (status === "readyToPlay") {
+      setBuffering(false); setLoading(false); setStarted(true);
+      try { const vt = player.videoTrack; if (vt && vt.width && vt.height) setVideoSize({ w: vt.width, h: vt.height }); } catch {}
+      if (pendingSeek.current != null) { const t = pendingSeek.current; pendingSeek.current = null; try { player.currentTime = t; } catch {} }
+      try { player.play(); } catch {}
+    } else if (status === "loading") setBuffering(true);
+    else if (status === "error") {
+      setBuffering(false);
+      if (!retried.current && infoRef.current && infoRef.current.method !== "Transcode") {
+        retried.current = true; flash("Formato non supportato: transcoding…");
+        load({ force: true }, itemRef.current, episodeRef.current, positionRef.current);
+      } else { setError((err && err.message) || "Stream non decodificabile."); setLoading(false); }
+    }
+  });
+
+  useEventListener(player, "videoTrackChange", ({ videoTrack }: any) => { if (videoTrack && videoTrack.width && videoTrack.height) setVideoSize({ w: videoTrack.width, h: videoTrack.height }); });
+
+  useEventListener(player, "timeUpdate", ({ currentTime }: any) => {
+    if (scrubbingRef.current || Date.now() < seekLock.current) return;
+    const pos = baseOffset.current + (currentTime || 0);
+    positionRef.current = pos; setPosition(pos);
+    const dur = (infoRef.current && infoRef.current.duration) || player.duration || 0;
+    if (dur > 0) setDuration(dur);
+    const it = itemRef.current; if (!it) return;
+    const id = episodeRef.current ? episodeRef.current.id : it.id;
+    if (Date.now() - lastSave.current > 5000 && dur > 0) { lastSave.current = Date.now(); saveProgress(id, pos, dur); }
+    if (dur > 0 && pos >= dur - 1 && !finishedRef.current) { finishedRef.current = true; handleEnd(); }
+  });
+
+  useEventListener(player, "playingChange", ({ isPlaying }: any) => setPlaying(!!isPlaying));
+
+  useEffect(() => {
+    if (!info) return;
+    reportPlayback(session, "start", info, positionRef.current, false);
+    const t = setInterval(() => reportPlayback(session, "progress", info, positionRef.current, !playingRef.current), 10000);
+    return () => clearInterval(t);
+  }, [info ? info.url : null]);
+
+  useEffect(() => {
+    if (mode !== "full" || !landscape || !controls || !playing || menu || loading) return;
+    const t = setTimeout(() => setControls(false), 4000);
+    return () => clearTimeout(t);
+  }, [mode, landscape, controls, playing, menu, loading]);
+
+  useEffect(() => {
+    if (!ended || !nextEp || !settings.autoplay) return;
+    const t = setTimeout(() => playEpisode(nextEp), 8000);
+    return () => clearTimeout(t);
+  }, [ended, nextEp, settings.autoplay]);
+
+  async function handleEnd() {
+    const it = itemRef.current; if (!it) return;
+    const id = episodeRef.current ? episodeRef.current.id : it.id;
+    const dur = (infoRef.current && infoRef.current.duration) || duration;
+    saveProgress(id, dur, dur);
+    let nx = null;
+    if (it.type === "series" && episodeRef.current) { try { const ss = await loadSeasons(session, it); nx = findNextEpisode(ss, episodeRef.current); } catch {} }
+    setNextEp(nx); setEnded(true);
+  }
+
+  function beginScrub() { scrubbingRef.current = true; setScrubbing(true); setScrub(positionRef.current); }
+  function endScrub(target: number) {
+    const dur = (infoRef.current && infoRef.current.duration) || duration || 0;
+    const T = Math.max(0, Math.min(target, dur > 0 ? dur - 0.25 : target));
+    scrubbingRef.current = false; setScrubbing(false);
+    seekLock.current = Date.now() + 1000;
+    setPosition(T); positionRef.current = T; finishedRef.current = false; setEnded(false);
+    if (infoRef.current && infoRef.current.hls) load(optsRef.current, itemRef.current, episodeRef.current, T);
+    else { try { player.currentTime = T; } catch {} }
+  }
+
+  function togglePlay() { try { if (playing) player.pause(); else player.play(); } catch {} setControls(true); }
+
+  async function rotate() {
+    try {
+      if (landscape) { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); setLandscape(false); }
+      else { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT); setLandscape(true); }
+    } catch {}
+    setControls(true);
+  }
+
+  async function switchAudio(index: number) { setMenu(null); flash("Cambio audio…"); await load({ audioIndex: index, force: true }, itemRef.current, episodeRef.current, positionRef.current); }
+  function selectSub(stream: any) {
+    setMenu(null);
+    if (!stream) { setCues([]); setSubIndex(null); subIndexRef.current = null; subLangRef.current = ""; flash("Sottotitoli disattivati"); return; }
+    loadSubTrack(stream);
+  }
+  function setQuality(q: string) { setMenu(null); flash("Qualità: " + (q === "auto" ? "auto" : q + "p")); load({ quality: q, force: q !== "auto" }, itemRef.current, episodeRef.current, positionRef.current); }
+  function playEpisode(ep: any) {
+    setEnded(false); setNextEp(null); setEpisode(ep); episodeRef.current = ep;
+    finishedRef.current = false; retried.current = false; optsRef.current = {}; setCues([]);
+    load({}, itemRef.current, ep, 0);
+  }
+
+  const value = {
+    player, mode, item, episode, info, loading, buffering, started, error, playing,
+    position, duration, scrubbing, scrub, cues, subIndex, subLoading, notice, ended,
+    nextEp, videoSize, landscape, controls, menu, fit, pipAvailable: !!NovaPip,
+    setControls, setMenu, setScrub, setFit,
+    open, close, minimize, expand, requestPip, togglePlay, beginScrub, endScrub, rotate,
+    switchAudio, selectSub, setQuality, playEpisode, flash
+  };
+  return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
+}
+
+function PipMount() {
+  const P = usePlayer();
+  if (P.mode !== "pip") return null;
+  return <VideoView player={P.player} style={{ width: 1, height: 1, position: "absolute", opacity: 0, left: -10 }} nativeControls={false} allowsPictureInPicture />;
+}
+
+function FloatingPlayer() {
+  const P = usePlayer();
+  const { settings, setSettings, items, list, toggleList } = useApp();
+  const dim = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const m = useRef(new Animated.Value(0)).current;
+  const mode = P.mode;
+  const isLand = P.landscape || dim.width > dim.height;
+
+  useEffect(() => {
+    if (mode === "mini") Animated.timing(m, { toValue: 1, duration: 220, useNativeDriver: true }).start();
+    else if (mode === "full") Animated.timing(m, { toValue: 0, duration: 240, useNativeDriver: true }).start();
+  }, [mode]);
+
+  const W = dim.width, H = dim.height;
+  const aspect = P.videoSize.w && P.videoSize.h ? P.videoSize.w / P.videoSize.h : 16 / 9;
+  const videoH = Math.min(W / aspect, H * 0.45);
+  const fullY = insets.top;
+  const miniBarH = 64;
+  const miniBarY = H - insets.bottom - miniBarH - 8;
+  const TW = 96, TH = 54, TX = 14, TY = miniBarY + 5;
+  const scaleMini = TW / W;
+  const dxMini = TX + TW / 2 - W / 2;
+  const dyMini = TY + TH / 2 - (fullY + videoH / 2);
+  const DIST = videoH * 0.85;
+
+  const fadeOut = m.interpolate({ inputRange: [0, 0.5], outputRange: [1, 0], extrapolate: "clamp" });
+  const fadeIn = m.interpolate({ inputRange: [0.5, 1], outputRange: [0, 1], extrapolate: "clamp" });
+  const dimBehind = m.interpolate({ inputRange: [0, 1], outputRange: [0, 0.35], extrapolate: "clamp" });
+
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
+    onMoveShouldSetPanResponderCapture: (_, g) => g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
+    onPanResponderMove: (_, g) => { if (g.dy > 0) m.setValue(Math.min(1, g.dy / DIST)); },
+    onPanResponderRelease: (_, g) => {
+      const mm = Math.max(0, g.dy / DIST);
+      if (g.dy < -60 || g.vy < -0.7) {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        P.rotate();
+      } else if (mm > 0.6 || g.vy > 0.85) {
+        Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+        P.minimize();
+      } else if (mm > 0.3 && settings.pip) {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        P.requestPip("full");
+      } else {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+      }
+    },
+    onPanResponderTerminate: () => Animated.spring(m, { toValue: 0, useNativeDriver: true }).start()
+  })).current;
+
+  const miniPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => false,
+    onMoveShouldSetPanResponder: (_, g) => g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx),
+    onPanResponderMove: (_, g) => { if (g.dy < 0) m.setValue(Math.max(0, 1 + g.dy / DIST)); },
+    onPanResponderRelease: (_, g) => {
+      if (g.dy < -30 || g.vy < -0.5) { Animated.timing(m, { toValue: 0, duration: 220, useNativeDriver: true }).start(); P.expand(); }
+      else Animated.spring(m, { toValue: 1, useNativeDriver: true, friction: 8, tension: 70 }).start();
+    },
+    onPanResponderTerminate: () => Animated.spring(m, { toValue: 1, useNativeDriver: true }).start()
+  })).current;
+
+  if (mode === "closed" || mode === "pip" || !P.item) return null;
+
+  const subText = activeCueText(P.cues, P.position);
+  const showControls = isLand ? P.controls : true;
+  const bigSpinner = (P.loading || P.buffering) && !P.started;
+  const zoom = isLand ? 1 : (settings.portraitZoom || 1);
+  const menuW = Math.min(400, W - 32);
+  const menuH = Math.min(H * 0.8, 560);
+  const title = P.episode ? P.episode.title : P.item.title;
+  const subTitle = P.episode ? P.item.title + " · S" + P.episode.season + ":E" + P.episode.episode : P.item.title;
+  const pct = P.duration > 0 ? Math.min(100, (P.position / P.duration) * 100) : 0;
+
+  const subStyle = {
+    color: settings.subColor || "#fff",
+    fontSize: settings.subSize,
+    lineHeight: settings.subSize * 1.32,
+    fontWeight: (settings.subBold ? "700" : "500") as any,
+    backgroundColor: settings.subBg ? "rgba(0,0,0,0.55)" : "transparent",
+    paddingHorizontal: settings.subBg ? 9 : 0,
+    paddingVertical: settings.subBg ? 4 : 0,
+    textShadowColor: settings.subOutline ? "#000" : "transparent",
+    textShadowRadius: settings.subOutline ? 5 : 0,
+    textShadowOffset: { width: 0, height: 1 }
+  };
+
+  const surfaceStyle: any = isLand
+    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
+    : {
+        position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
+        borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
+        transform: [
+          { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
+          { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
+          { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) }
+        ]
+      };
+
+  const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
+
+  return (
+    <View style={styles.floatRoot} pointerEvents="box-none">
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: "#000", opacity: isLand ? 0 : dimBehind }]} />
+
+      {!isLand && (
+        <Animated.ScrollView
+          pointerEvents={mode === "full" ? "auto" : "none"}
+          style={[styles.infoPanelAbs, { top: fullY + videoH, opacity: fadeOut }]}
+          contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 90 }}
+        >
+          <Text style={styles.infoTitle}>{title}</Text>
+          <Text style={styles.infoSub}>{subTitle}</Text>
+          <View style={styles.metaRow}>
+            <Text style={styles.match}>{P.item.match}% compatibile</Text>
+            <Text style={styles.badge}>{P.item.rating}</Text>
+            <Text style={styles.badge}>{(P.info && P.info.method) || "—"}</Text>
+          </View>
+          <View style={[styles.actions, { marginVertical: 14 }]}>
+            <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, list.includes(P.item.id) && styles.roundOn]}>
+              <Ionicons name={list.includes(P.item.id) ? "checkmark" : "add"} size={24} color={list.includes(P.item.id) ? C.green : "#fff"} />
+            </Pressable>
+            <Pressable onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }} style={styles.ghostButton}>
+              <Ionicons name="information-circle-outline" size={20} color="#fff" /><Text style={styles.ghostButtonText}>Dettagli</Text>
+            </Pressable>
+          </View>
+          {P.episode && P.episode.overview ? <Text style={styles.infoDesc}>{P.episode.overview}</Text> : null}
+          {P.item.overview ? <Text style={styles.infoDesc}>{P.item.overview}</Text> : null}
+          <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{P.item.genres.join(", ") || "–"}</Text>
+          <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{(P.item.cast || []).join(", ") || "–"}</Text>
+          {settings.stats && P.info ? (
+            <View style={styles.statsInline}>
+              <Text style={styles.statsTitle}>STATISTICHE</Text>
+              <Text style={styles.statsLine}>Metodo {P.info.method} · Qualità {P.info.quality}</Text>
+              <Text style={styles.statsLine}>Sub {P.subIndex != null ? "attivi" : "off"} · {P.cues.length} battute</Text>
+              <Text style={styles.statsLine}>PiP nativo: {P.pipAvailable ? "modulo presente" : "modulo assente"}</Text>
+              <Text style={styles.statsLine}>{P.info.reason}</Text>
+            </View>
+          ) : null}
+        </Animated.ScrollView>
+      )}
+
+      <Animated.View style={surfaceStyle}>
+        <VideoView player={P.player} style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]} contentFit={isLand ? P.fit : "contain"} nativeControls={false} allowsPictureInPicture />
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} {...(!isLand && mode === "full" ? pan.panHandlers : {})} />
+
+        {subText && mode === "full" ? (
+          <View style={[styles.subBox, { bottom: showControls && isLand ? 82 : 14 }]} pointerEvents="none">
+            <Text style={[styles.subText, subStyle]}>{subText}</Text>
+          </View>
+        ) : null}
+
+        {bigSpinner ? <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View> : null}
+
+        {showControls && !bigSpinner && !P.ended && !P.error && mode === "full" ? (
+          <Pressable onPress={P.togglePlay} style={styles.centerPlay} hitSlop={26}>
+            <Ionicons name={P.playing ? "pause" : "play"} size={isLand ? 60 : 46} color="#fff" style={styles.centerIcon} />
+          </Pressable>
+        ) : null}
+
+        {showControls && !P.error && mode === "full" ? (
+          <>
+            <LinearGradient colors={["rgba(0,0,0,0.7)", "transparent"]} style={styles.vTopScrim} pointerEvents="none" />
+            <View style={[styles.vTop, { top: isLand ? Math.max(insets.top, 4) : 4 }]}>
+              <IconButton name="chevron-down" size={26} onPress={P.minimize} />
+              <View style={{ flex: 1 }}>{isLand ? <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text> : null}</View>
+              {P.buffering && P.started ? <ActivityIndicator color={C.red} size="small" style={{ marginRight: 6 }} /> : null}
+              <IconButton name="copy-outline" size={20} onPress={() => P.requestPip()} />
+              {isLand ? <IconButton name={P.fit === "contain" ? "scan-outline" : "contract-outline"} size={22} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} /> : null}
+              {!settings.rotateBottom ? rotateBtn : null}
+            </View>
+
+            <LinearGradient colors={["transparent", "rgba(0,0,0,0.8)"]} style={styles.vBottomScrim} pointerEvents="none" />
+            <View style={[styles.vBottom, { bottom: isLand ? Math.max(insets.bottom, 2) : 2 }]}>
+              <Slider style={{ width: "100%", height: 28 }} minimumValue={0} maximumValue={Math.max(1, P.duration)}
+                value={P.scrubbing ? P.scrub : P.position} minimumTrackTintColor={C.red} maximumTrackTintColor="rgba(255,255,255,0.35)" thumbTintColor={C.red}
+                onSlidingStart={P.beginScrub} onValueChange={P.setScrub} onSlidingComplete={P.endScrub} />
+              <View style={styles.vControls}>
+                <Text style={styles.playerTime}>{fmt(P.scrubbing ? P.scrub : P.position)} <Text style={styles.faint}>/ {fmt(P.duration)}</Text></Text>
+                <View style={{ flex: 1 }} />
+                <IconButton name="musical-notes-outline" size={20} onPress={() => P.setMenu("audio")} />
+                <IconButton name="chatbox-ellipses-outline" size={20} active={P.subIndex != null} onPress={() => P.setMenu("subs")} />
+                <Pressable onPress={() => P.setMenu("quality")} style={styles.hdButton}><View style={styles.hdBox}><Text style={styles.hdText}>{P.info && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View></Pressable>
+                <IconButton name="settings-outline" size={20} onPress={() => P.setMenu("root")} />
+                {settings.rotateBottom ? rotateBtn : null}
+              </View>
+            </View>
+          </>
+        ) : null}
+
+        {P.error ? (
+          <View style={styles.vError}>
+            <Ionicons name="warning-outline" size={36} color={C.amber} />
+            <Text style={styles.emptyTitleSm}>Video non caricabile</Text>
+            <Text style={styles.mutedSm}>{P.error}</Text>
+            <View style={styles.actions}>
+              <Pressable onPress={() => P.setQuality("auto")} style={styles.primaryButtonSm}><Text style={styles.primaryButtonText}>Riprova</Text></Pressable>
+              <Pressable onPress={P.close} style={styles.secondaryButtonSm}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
+            </View>
+          </View>
+        ) : null}
+
+        {P.ended ? (
+          <View style={styles.vError}>
+            <Text style={styles.endLabel}>{P.nextEp ? "Prossimo episodio" : "Fine"}</Text>
+            {P.nextEp ? (
+              <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.nextCard}>
+                <View style={styles.nextThumb} />
+                <View style={{ flex: 1 }}><Text style={styles.episodeTitle}>S{P.nextEp.season}:E{P.nextEp.episode} · {P.nextEp.title}</Text><Text style={styles.mutedSm}>{P.item.title}</Text></View>
+              </Pressable>
+            ) : null}
+            <View style={styles.actions}>
+              {P.nextEp ? <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.whiteButton}><Ionicons name="play" size={18} color="#000" /><Text style={styles.whiteButtonText}>Guarda</Text></Pressable> : null}
+              <Pressable onPress={() => P.endScrub(0)} style={styles.ghostButton}><Ionicons name="refresh" size={18} color="#fff" /><Text style={styles.ghostButtonText}>Riguarda</Text></Pressable>
+              <Pressable onPress={P.close} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
+            </View>
+          </View>
+        ) : null}
+      </Animated.View>
+
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...(!isLand ? miniPan.panHandlers : {})}>
+        <View style={{ width: TW + 12 }} />
+        <View style={{ flex: 1, paddingRight: 6 }}>
+          <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
+          <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
+        </View>
+        <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
+        <IconButton name="close" size={22} onPress={P.close} />
+        <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]}>
+          <View style={[styles.progressFill, { width: pct + "%" }]} />
+        </View>
+      </Animated.View>
+
+      {P.notice ? <View style={[styles.notice, { top: isLand ? Math.max(insets.top, 12) : insets.top + videoH + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View> : null}
+
+      {P.menu ? (
+        <Modal visible transparent animationType="fade" onRequestClose={() => P.setMenu(null)}>
+          <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => P.setMenu(null)}>
+            <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
+              <ScrollView showsVerticalScrollIndicator keyboardShouldPersistTaps="handled" bounces={false}>
+                {P.menu === "root" && (
+                  <>
+                    <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
+                    <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
+                    <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
+                    <MenuItem label="Zoom verticale" value={Math.round((settings.portraitZoom || 1) * 100) + "%"} onPress={() => P.setMenu("zoom")} />
+                    <MenuItem label="Riempimento schermo" value={P.fit === "contain" ? "Adatta" : "Riempi"} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />
+                    <MenuItem label="Picture-in-Picture" value={P.pipAvailable ? "disponibile" : "modulo assente"} onPress={() => { P.setMenu(null); P.requestPip(); }} />
+                    <MenuToggle label="Tasto rotazione in basso" value={settings.rotateBottom} onToggle={() => setSettings({ ...settings, rotateBottom: !settings.rotateBottom })} />
+                    <MenuToggle label="Avvio rapido" value={settings.fastStart} onToggle={() => setSettings({ ...settings, fastStart: !settings.fastStart })} />
+                    <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
+                    <MenuToggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
+                    <MenuToggle label="Background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
+                    <MenuToggle label="PiP automatico con home" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
+                    <MenuToggle label="Statistiche" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
+                    <MenuItem label="Miniplayer" onPress={() => { P.setMenu(null); P.minimize(); }} />
+                    <MenuItem label="Chiudi video" onPress={() => { P.setMenu(null); P.close(); }} />
+                  </>
+                )}
+                {P.menu === "substyle" && (
+                  <>
+                    <MenuHeader title="Stile sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    <MenuToggle label="Sfondo" value={settings.subBg} onToggle={() => setSettings({ ...settings, subBg: !settings.subBg })} />
+                    <MenuToggle label="Bordo / ombra" value={settings.subOutline} onToggle={() => setSettings({ ...settings, subOutline: !settings.subOutline })} />
+                    <MenuToggle label="Grassetto" value={settings.subBold} onToggle={() => setSettings({ ...settings, subBold: !settings.subBold })} />
+                    {[14, 16, 18, 20, 24, 28, 32].map(s => <MenuItem key={s} label={"Dimensione " + s + "px"} selected={settings.subSize === s} onPress={() => setSettings({ ...settings, subSize: s })} />)}
+                    {[["#ffffff", "Bianco"], ["#ffe600", "Giallo"], ["#7CFC00", "Verde"], ["#00e5ff", "Ciano"]].map(c => <MenuItem key={c[0]} label={"Colore " + c[1]} selected={settings.subColor === c[0]} onPress={() => setSettings({ ...settings, subColor: c[0] })} />)}
+                  </>
+                )}
+                {P.menu === "zoom" && (
+                  <>
+                    <MenuHeader title="Zoom verticale" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {[1, 1.05, 1.1, 1.15, 1.2, 1.3].map(z => <MenuItem key={z} label={Math.round(z * 100) + "%"} selected={Math.abs((settings.portraitZoom || 1) - z) < 0.001} onPress={() => setSettings({ ...settings, portraitZoom: z })} />)}
+                    <Text style={styles.menuNote}>Oltre il 100% il video riempie il riquadro eliminando le righe nere, con un leggero crop ai bordi.</Text>
+                  </>
+                )}
+                {P.menu === "speed" && (
+                  <>
+                    <MenuHeader title="Velocità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map(s => <MenuItem key={s} label={s === 1 ? "Normale" : s + "×"} selected={settings.speed === s} onPress={() => setSettings({ ...settings, speed: s })} />)}
+                  </>
+                )}
+                {P.menu === "quality" && (
+                  <>
+                    <MenuHeader title="Qualità" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {["auto", "2160", "1080", "720", "480", "360"].map(q => <MenuItem key={q} label={q === "auto" ? "Automatica (Direct Play)" : q + "p"} selected={String(P.info && P.info.quality) === q} onPress={() => P.setQuality(q)} />)}
+                    <Text style={styles.menuNote}>Solo "Automatica" evita la conversione sul server: le altre attivano il transcoding.</Text>
+                  </>
+                )}
+                {P.menu === "audio" && (
+                  <>
+                    <MenuHeader title="Audio" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {(!P.info || !P.info.audio || P.info.audio.length === 0) ? <Text style={styles.menuNote}>Nessuna traccia selezionabile.</Text> : null}
+                    {(P.info && P.info.audio ? P.info.audio : []).map((a: any) => <MenuItem key={a.Index} label={a.DisplayTitle || a.Language || "Audio " + a.Index} selected={P.info.audioIndex === a.Index} onPress={() => P.switchAudio(a.Index)} />)}
+                  </>
+                )}
+                {P.menu === "subs" && (
+                  <>
+                    <MenuHeader title="Sottotitoli" onBack={() => P.setMenu("root")} onClose={() => P.setMenu(null)} />
+                    {P.subLoading ? <Text style={styles.menuNote}>Caricamento… il video continua.</Text> : null}
+                    <MenuItem label="Disattivati" selected={P.subIndex == null} onPress={() => P.selectSub(null)} />
+                    {(P.info && P.info.subs ? P.info.subs : []).map((s: any) => <MenuItem key={s.Index} label={(s.DisplayTitle || s.Language || "Sub " + s.Index) + (isTextSub(s) ? "" : "  · grafico")} selected={P.subIndex === s.Index} disabled={!isTextSub(s)} onPress={() => P.selectSub(s)} />)}
+                    {(!P.info || !P.info.subs || P.info.subs.length === 0) ? <Text style={styles.menuNote}>Questo file non contiene sottotitoli.</Text> : null}
+                    <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
+                  </>
+                )}
+              </ScrollView>
+            </Pressable>
+          </Pressable>
+        </Modal>
+      ) : null}
+    </View>
+  );
+}
+
+function LoginScreen() {
+  const { setSession, resetLocal } = useApp();
+  const [server, setServer] = useState("");
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
+  const [showPass, setShowPass] = useState(false);
+  const [status, setStatus] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem("nova.lastServer").then(v => v && setServer(v));
+    AsyncStorage.getItem("nova.lastUser").then(v => v && setUser(v));
+  }, []);
+
+  async function doTest() {
+    setStatus("Verifico…"); setErr("");
+    try { const r = await testServer(server); setStatus("✓ " + r.name + " · v" + r.version); } catch (e: any) { setStatus(e.message); }
+  }
+  async function doLogin() {
+    setBusy(true); setErr("");
+    try {
+      const s = await authenticate(server, user, pass);
+      await AsyncStorage.setItem("nova.lastServer", s.server);
+      await AsyncStorage.setItem("nova.lastUser", user);
+      await setSession(s);
+    } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  return (
+    <SafeAreaView style={styles.screen}>
+      <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
+        <Text style={styles.logo}>NOVA</Text>
+        <Text style={styles.logoSub}>for Jellyfin</Text>
+        <View style={styles.loginCard}>
+          <Text style={styles.loginCardTitle}>Accedi</Text>
+          <Text style={styles.loginCardSub}>Connettiti al tuo server Jellyfin.</Text>
+          <Text style={styles.label}>Server</Text>
+          <TextInput value={server} onChangeText={setServer} placeholder="http://192.168.1.10:8096" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
+          <Pressable onPress={doTest} style={styles.testButton}><Text style={styles.testButtonText}>Test connessione</Text></Pressable>
+          {status ? <Text style={[styles.status, status.startsWith("✓") ? styles.ok : styles.bad]}>{status}</Text> : null}
+          <Text style={styles.label}>Utente</Text>
+          <TextInput value={user} onChangeText={setUser} autoCapitalize="none" autoCorrect={false} style={styles.input} />
+          <Text style={styles.label}>Password</Text>
+          <View style={styles.passWrap}>
+            <TextInput value={pass} onChangeText={setPass} secureTextEntry={!showPass} autoCapitalize="none" autoCorrect={false} autoComplete="off" importantForAutofill="no" style={[styles.input, { paddingRight: 50 }]} />
+            <Pressable onPress={() => setShowPass(v => !v)} style={styles.eyeButton}><Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} /></Pressable>
+          </View>
+          {err ? <Text style={styles.bad}>{err}</Text> : null}
+          <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}><Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text></Pressable>
+          <View style={styles.divider}><View style={styles.dividerLine} /><Text style={styles.dividerText}>oppure</Text><View style={styles.dividerLine} /></View>
+          <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Esplora la demo</Text></Pressable>
+          <Pressable onPress={resetLocal} style={styles.fixButton}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function TopBar() {
+  const { session, setSession, reloadLibrary, resetLocal } = useApp();
+  const insets = useSafeAreaInsets();
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
+  return (
+    <>
+      <View style={[styles.topBar, { paddingTop: insets.top, height: 62 + insets.top }]}>
+        <Text style={styles.topLogo}>NOVA</Text>
+        <View style={{ flex: 1 }} />
+        <IconButton name="search" onPress={() => navigationRef.navigate("Search")} />
+        <IconButton name="settings-outline" onPress={() => navigationRef.navigate("Settings")} />
+        <Pressable onPress={() => setOpen(true)} style={({ pressed }) => pressed && { opacity: 0.75 }}><Face size={34} /></Pressable>
+      </View>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
+        <Pressable style={styles.modalBackdrop} onPress={close}>
+          <Pressable style={styles.profileMenu} onPress={() => {}}>
+            <View style={styles.profileHead}>
+              <Face size={54} />
+              <View style={{ flex: 1 }}><Text style={styles.profileName}>{(session && session.user) || "Matteo"}</Text><Text style={styles.muted} numberOfLines={1}>{session && session.mode === "demo" ? "Modalità demo" : (session ? session.server : "")}</Text></View>
+            </View>
+            <MenuItem label="Impostazioni" onPress={() => { close(); navigationRef.navigate("Settings"); }} />
+            <MenuItem label="Ricarica libreria" onPress={() => { close(); reloadLibrary(); }} />
+            <MenuItem label="Esci" onPress={() => { close(); setSession(null); }} />
+            <MenuItem label="Ripara dati locali" onPress={() => { close(); resetLocal(); }} />
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
+
+function HomeScreen() {
+  const { items, epMap, progress, nextUp, list, libLoading, settings, featured, reshuffle } = useApp();
+  const P = usePlayer();
+  const wide = settings.thumbWide;
+  const cardW = settings.posterSize;
+  const wideW = Math.round(cardW * 1.75);
+
+  const continueData = useMemo(() => Object.keys(progress)
+    .filter(id => progress[id].position > 5 && !isWatched(progress[id]))
+    .sort((a, b) => progress[b].updated - progress[a].updated)
+    .map(id => {
+      const ep = epMap[id];
+      if (ep) { const it = items.find((x: any) => x.id === ep.seriesId); return it ? { item: it, ep } : null; }
+      const it = items.find((x: any) => x.id === id); return it ? { item: it, ep: null } : null;
+    }).filter(Boolean), [items, epMap, progress]);
+
+  const myList = useMemo(() => items.filter((i: any) => list.includes(i.id)), [items, list]);
+  const goDetail = (id: string) => navigationRef.navigate("Detail", { itemId: id });
+
+  if (libLoading) return <SafeAreaView style={styles.center}><ActivityIndicator color={C.red} size="large" /><Text style={styles.muted}>Carico la libreria…</Text></SafeAreaView>;
+  if (!featured) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Libreria vuota</Text></SafeAreaView>;
+
+  return (
+    <View style={styles.screen}>
+      <TopBar />
+      <ScrollView showsVerticalScrollIndicator={false}>
+        <View style={styles.hero}>
+          {featured.backdrop ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + featured.hue + ",55%,22%)" }]} />}
+          <LinearGradient colors={["rgba(8,8,11,0.15)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
+          <View style={styles.heroContent}>
+            <View style={styles.heroKickerRow}><Text style={styles.heroKicker}>CONSIGLIATO PER TE</Text><Pressable onPress={reshuffle} style={styles.shuffleBtn}><Ionicons name="shuffle" size={16} color={C.muted} /></Pressable></View>
+            <Text style={styles.heroTitle}>{featured.title}</Text>
+            <View style={styles.metaRow}><Text style={styles.match}>{featured.match}% compatibile</Text><Text style={styles.metaText}>{featured.year}</Text><Text style={styles.badge}>HD</Text></View>
+            <Text numberOfLines={3} style={styles.heroDesc}>{featured.overview}</Text>
+            <View style={styles.actions}>
+              <Pressable onPress={() => P.open(featured)} style={styles.whiteButton}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text></Pressable>
+              <Pressable onPress={() => goDetail(featured.id)} style={styles.ghostButton}><Ionicons name="information-circle-outline" size={22} color="#fff" /><Text style={styles.ghostButtonText}>Info</Text></Pressable>
+            </View>
+          </View>
+        </View>
+        <View style={styles.rows}>
+          <Row title="Continua a guardare" data={continueData} keyExtractor={(x: any) => (x.ep ? x.ep.id : x.item.id)} renderItem={({ item: x }: any) => <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW} progress={progress[x.ep ? x.ep.id : x.item.id]} onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />} />
+          <Row title="Prossimi episodi" data={nextUp} keyExtractor={(x: any) => x.ep.id} renderItem={({ item: x }: any) => <MediaCard item={x.item} ep={x.ep} wide={wide} width={wide ? wideW : cardW} progress={progress[x.ep.id]} onPress={() => P.open(x.item, x.ep)} onLongPress={() => goDetail(x.item.id)} />} />
+          <Row title="La tua lista" data={myList} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Aggiunti di recente" data={items.slice().sort((a: any, b: any) => b.added - a.added)} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Film" data={items.filter((i: any) => i.type === "movie")} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+          <Row title="Serie TV" data={items.filter((i: any) => i.type === "series")} keyExtractor={(x: any) => x.id} renderItem={({ item }: any) => <MediaCard item={item} width={cardW} onPress={() => goDetail(item.id)} onLongPress={() => goDetail(item.id)} />} />
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+function SearchScreen() {
+  const { items } = useApp();
+  const [q, setQ] = useState("");
+  const res = q.trim() ? items.filter((i: any) => i.title.toLowerCase().includes(q.toLowerCase()) || i.genres.join(" ").toLowerCase().includes(q.toLowerCase())) : [];
+  return (
+    <SafeAreaView style={styles.screen}>
+      <View style={styles.searchHeader}><IconButton name="arrow-back" onPress={() => navigationRef.goBack()} /><TextInput autoFocus value={q} onChangeText={setQ} placeholder="Cerca titoli, generi…" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} style={styles.searchInput} /></View>
+      <FlatList data={res} keyExtractor={(i: any) => i.id} numColumns={3} contentContainerStyle={styles.grid}
+        renderItem={({ item }) => <View style={styles.gridItem}><MediaCard item={item} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: item.id })} /><Text numberOfLines={1} style={styles.gridTitle}>{item.title}</Text></View>}
+        ListEmptyComponent={<View style={styles.center}><Ionicons name="search" size={48} color={C.faint} /><Text style={styles.emptyTitle}>Cerca nella libreria</Text></View>} />
+    </SafeAreaView>
+  );
+}
+
+function DetailScreen({ route }: any) {
+  const { session, items, progress, list, toggleList } = useApp();
+  const P = usePlayer();
+  const item = items.find((x: any) => x.id === route.params.itemId);
+  const [seasons, setSeasons] = useState<any[]>(item && item.seasons ? item.seasons : []);
+  const [season, setSeason] = useState(1);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!item || item.type !== "series" || seasons.length) return;
+    setLoading(true);
+    loadSeasons(session, item).then(setSeasons).catch(e => Alert.alert("Errore episodi", e.message)).finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item ? item.id : null]);
+
+  if (!item) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Titolo non trovato</Text></SafeAreaView>;
+  const cur = seasons.find((s: any) => s.n === season) || seasons[0];
+  const ep = item.type === "series" ? targetEpisode(seasons, progress) : null;
+  const resume = ep ? (progress[ep.id] ? progress[ep.id].position || 0 : 0) : (progress[item.id] ? progress[item.id].position || 0 : 0);
+  const similar = items.filter((x: any) => x.id !== item.id && x.genres.some((g: string) => item.genres.includes(g))).slice(0, 8);
+  const inList = list.includes(item.id);
+
+  return (
+    <ScrollView style={styles.screen} showsVerticalScrollIndicator={false}>
+      <View style={styles.detailHero}>
+        {item.backdrop ? <ImageBackground source={{ uri: item.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + item.hue + ",55%,22%)" }]} />}
+        <LinearGradient colors={["rgba(8,8,11,0.2)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
+        <SafeAreaView style={styles.detailHeroContent}>
+          <IconButton name="arrow-back" onPress={() => navigationRef.goBack()} />
+          <Text style={styles.detailTitle}>{item.title}</Text>
+          <View style={styles.metaRow}><Text style={styles.match}>{item.match}% compatibile</Text><Text style={styles.metaText}>{item.year}</Text><Text style={styles.badge}>{item.rating}</Text></View>
+          <Text numberOfLines={4} style={styles.heroDesc}>{item.overview}</Text>
+          <View style={styles.actions}>
+            <Pressable onPress={() => P.open(item, ep)} style={styles.whiteButton}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text></Pressable>
+            <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={26} color={inList ? C.green : "#fff"} /></Pressable>
+          </View>
+          {inList ? <Text style={styles.inListNote}>Nella tua lista</Text> : null}
+        </SafeAreaView>
+      </View>
+      <View style={styles.detailBody}>
+        <Text style={styles.facts}><Text style={styles.faint}>Cast: </Text>{item.cast.join(", ") || "–"}</Text>
+        <Text style={styles.facts}><Text style={styles.faint}>Generi: </Text>{item.genres.join(", ") || "–"}</Text>
+        {item.type === "series" ? (
+          <>
+            <View style={styles.seasonHeader}><Text style={styles.sectionTitle}>Episodi</Text>{loading ? <ActivityIndicator color={C.red} /> : null}</View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+              {seasons.map((s: any) => <Pressable key={s.n} onPress={() => setSeason(s.n)} style={[styles.seasonChip, cur && cur.n === s.n ? styles.seasonChipOn : null]}><Text style={[styles.seasonText, cur && cur.n === s.n ? styles.seasonTextOn : null]}>{s.name}</Text></Pressable>)}
+            </ScrollView>
+            {(cur && cur.episodes ? cur.episodes : []).map((e: any) => {
+              const p = progress[e.id];
+              const pc = p && p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0;
+              return (
+                <Pressable key={e.id} onPress={() => P.open(item, e)} style={styles.episode}>
+                  <Text style={styles.episodeNum}>{e.episode}</Text>
+                  <View style={styles.episodeThumb}><Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} />{pc > 0 ? <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pc + "%" }]} /></View> : null}</View>
+                  <View style={{ flex: 1 }}><Text style={styles.episodeTitle}>{e.title}</Text><Text numberOfLines={2} style={styles.episodeDesc}>{e.overview}</Text></View>
+                  <Text style={styles.faint}>{fmt(e.duration)}</Text>
+                </Pressable>
+              );
+            })}
+          </>
+        ) : null}
+        {similar.length > 0 ? (
+          <>
+            <Text style={styles.sectionTitle}>Altri titoli simili</Text>
+            <View style={styles.similarGrid}>
+              {similar.map((x: any) => <View key={x.id} style={styles.similarItem}><MediaCard item={x} width="100%" onPress={() => navigationRef.navigate("Detail", { itemId: x.id })} /></View>)}
+            </View>
+          </>
+        ) : null}
+      </View>
+    </ScrollView>
+  );
+}
+
+function Choice({ label, value, options, onChange }: any) {
+  return (
+    <View style={styles.settingBlock}>
+      <Text style={styles.settingLabel}>{label}</Text>
+      <View style={styles.choiceWrap}>{options.map((o: any) => <Pressable key={o[0]} onPress={() => onChange(o[0])} style={[styles.choice, String(value) === String(o[0]) ? styles.choiceOn : null]}><Text style={[styles.choiceText, String(value) === String(o[0]) ? styles.choiceTextOn : null]}>{o[1]}</Text></Pressable>)}</View>
+    </View>
+  );
+}
+
+function Toggle({ label, value, onToggle }: any) {
+  return <Pressable onPress={onToggle} style={styles.settingRow}><Text style={styles.settingLabel}>{label}</Text><View style={[styles.switch, value ? styles.switchOn : null]}><View style={[styles.switchKnob, value ? styles.switchKnobOn : null]} /></View></Pressable>;
+}
+
+function SettingsScreen() {
+  const { session, settings, setSettings, reloadLibrary, resetLocal, setSession } = useApp();
+  const dim = useWindowDimensions();
+  const twoCol = dim.width > 700;
+  async function doTest() {
+    if (session.mode === "demo") return Alert.alert("Demo", "Sei in modalità demo.");
+    try { const r = await testServer(session.server); Alert.alert("Server OK", r.name + " · v" + r.version); } catch (e: any) { Alert.alert("Test fallito", e.message); }
+  }
+  return (
+    <SafeAreaView style={styles.screen}>
+      <View style={styles.searchHeader}><IconButton name="arrow-back" onPress={() => navigationRef.goBack()} /><Text style={styles.pageTitle}>Impostazioni</Text></View>
+      <ScrollView contentContainerStyle={[styles.settingsScroll, twoCol && styles.settingsScrollWide]} keyboardShouldPersistTaps="handled">
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
+          <Text style={styles.sectionTitle}>Riproduzione</Text>
+          <Choice label="Modalità streaming" value={settings.streamMode} options={[["auto", "Auto"], ["direct", "Direct Play"], ["transcode", "Transcoding"]]} onChange={(v: string) => setSettings({ ...settings, streamMode: v })} />
+          <Choice label="Qualità massima" value={settings.quality} options={[["auto", "Auto"], ["2160", "4K"], ["1080", "1080p"], ["720", "720p"], ["480", "480p"]]} onChange={(v: string) => setSettings({ ...settings, quality: v })} />
+          <Toggle label="Avvio rapido (buffer minimo)" value={settings.fastStart} onToggle={() => setSettings({ ...settings, fastStart: !settings.fastStart })} />
+          <Toggle label="Risparmio dati" value={settings.saveData} onToggle={() => setSettings({ ...settings, saveData: !settings.saveData })} />
+          <Toggle label="Prossimo episodio automatico" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
+          <Toggle label="Ripeti video" value={settings.loop} onToggle={() => setSettings({ ...settings, loop: !settings.loop })} />
+          <Toggle label="Continua in background" value={settings.background} onToggle={() => setSettings({ ...settings, background: !settings.background })} />
+          <Toggle label="PiP automatico con tasto home" value={settings.pip} onToggle={() => setSettings({ ...settings, pip: !settings.pip })} />
+          <Choice label="Velocità" value={settings.speed} options={[[0.5, "0.5×"], [0.75, "0.75×"], [1, "1×"], [1.25, "1.25×"], [1.5, "1.5×"], [2, "2×"]]} onChange={(v: number) => setSettings({ ...settings, speed: v })} />
+        </View>
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
+          <Text style={styles.sectionTitle}>Sottotitoli</Text>
+          <Choice label="Lingua" value={settings.subLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, subLang: v })} />
+          <Toggle label="Automatici" value={settings.autoSub} onToggle={() => setSettings({ ...settings, autoSub: !settings.autoSub })} />
+          <Toggle label="Sfondo" value={settings.subBg} onToggle={() => setSettings({ ...settings, subBg: !settings.subBg })} />
+          <Toggle label="Bordo / ombra" value={settings.subOutline} onToggle={() => setSettings({ ...settings, subOutline: !settings.subOutline })} />
+          <Toggle label="Grassetto" value={settings.subBold} onToggle={() => setSettings({ ...settings, subBold: !settings.subBold })} />
+          <Choice label="Dimensione" value={settings.subSize} options={[[14, "14"], [16, "16"], [18, "18"], [20, "20"], [24, "24"], [28, "28"], [32, "32"]]} onChange={(v: number) => setSettings({ ...settings, subSize: v })} />
+          <Choice label="Colore" value={settings.subColor} options={[["#ffffff", "Bianco"], ["#ffe600", "Giallo"], ["#7CFC00", "Verde"], ["#00e5ff", "Ciano"]]} onChange={(v: string) => setSettings({ ...settings, subColor: v })} />
+          <Choice label="Lingua audio" value={settings.audioLang} options={[["it", "IT"], ["en", "EN"], ["ja", "JA"], ["fr", "FR"], ["de", "DE"]]} onChange={(v: string) => setSettings({ ...settings, audioLang: v })} />
+        </View>
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
+          <Text style={styles.sectionTitle}>Interfaccia</Text>
+          <Text style={styles.settingLabel}>Dimensione locandine: {settings.posterSize}px</Text>
+          <Slider minimumValue={120} maximumValue={220} step={5} value={settings.posterSize} minimumTrackTintColor={C.red} maximumTrackTintColor={C.surface3} thumbTintColor={C.red} onValueChange={v => setSettings({ ...settings, posterSize: v })} />
+          <Choice label="Zoom video in verticale" value={settings.portraitZoom} options={[[1, "100%"], [1.05, "105%"], [1.1, "110%"], [1.15, "115%"], [1.2, "120%"], [1.3, "130%"]]} onChange={(v: number) => setSettings({ ...settings, portraitZoom: v })} />
+          <Toggle label="Tasto rotazione in basso" value={settings.rotateBottom} onToggle={() => setSettings({ ...settings, rotateBottom: !settings.rotateBottom })} />
+          <Toggle label="Locandine orizzontali (Continua / Prossimi)" value={settings.thumbWide} onToggle={() => setSettings({ ...settings, thumbWide: !settings.thumbWide })} />
+          <Toggle label="Animazioni" value={settings.animations} onToggle={() => setSettings({ ...settings, animations: !settings.animations })} />
+          <Toggle label="Barre di progresso" value={settings.progressBars} onToggle={() => setSettings({ ...settings, progressBars: !settings.progressBars })} />
+          <Toggle label="Statistiche riproduzione" value={settings.stats} onToggle={() => setSettings({ ...settings, stats: !settings.stats })} />
+        </View>
+        <View style={[styles.settingsCard, twoCol && styles.halfCard]}>
+          <Text style={styles.sectionTitle}>Server</Text>
+          <Text style={styles.muted}>{session.mode === "demo" ? "Modalità demo" : session.server}</Text>
+          <View style={styles.settingsActions}>
+            <Pressable onPress={reloadLibrary} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Ricarica libreria</Text></Pressable>
+            <Pressable onPress={doTest} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Test server</Text></Pressable>
+            <Pressable onPress={() => setSession(null)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Esci</Text></Pressable>
+            <Pressable onPress={resetLocal} style={styles.fixButton}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function CrashReportScreen({ info, onDismiss, onClear }: any) {
+  return (
+    <SafeAreaView style={styles.screen}>
+      <ScrollView contentContainerStyle={{ padding: 20, gap: 14 }}>
+        <Text style={{ color: C.red, fontSize: 22, fontWeight: "900" }}>Crash registrato</Text>
+        <Text style={{ color: C.muted, fontSize: 12 }}>{new Date(info.t).toLocaleString()}</Text>
+        <View style={styles.statsInline}>
+          <Text style={{ color: C.text, fontSize: 14, fontWeight: "800", marginBottom: 6 }}>{info.msg}</Text>
+          <Text style={{ color: C.muted, fontSize: 11, lineHeight: 16 }}>{info.stack}</Text>
+        </View>
+        <Pressable onPress={onDismiss} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Avvia NOVA comunque</Text></Pressable>
+        <Pressable onPress={onClear} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Cancella registro e avvia</Text></Pressable>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+export default function App() {
+  const [session, setSessionState] = useState<any>(null);
+  const [booting, setBooting] = useState(true);
+  const [libLoading, setLibLoading] = useState(false);
+  const [items, setItems] = useState<any[]>([]);
+  const [epMap, setEpMap] = useState<any>({});
+  const [nextUp, setNextUp] = useState<any[]>([]);
+  const [progress, setProgress] = useState<any>({});
+  const [list, setList] = useState<string[]>([]);
+  const [settings, setSettings] = useState<any>(defaultSettings);
+  const [featured, setFeatured] = useState<any>(null);
+  const [crashInfo, setCrashInfo] = useState<any>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await SecureStore.getItemAsync("nova.session");
+        const st = await AsyncStorage.getItem("nova.settings");
+        const pr = await AsyncStorage.getItem("nova.progress");
+        const li = await AsyncStorage.getItem("nova.list");
+        if (s) setSessionState(JSON.parse(s));
+        if (st) setSettings({ ...defaultSettings, ...JSON.parse(st) });
+        if (pr) setProgress(JSON.parse(pr));
+        if (li) setList(JSON.parse(li));
+      } catch {}
+      try {
+        const raw = await AsyncStorage.getItem("nova.lastcrash");
+        if (raw) {
+          const c = JSON.parse(raw);
+          if (c && c.t && Date.now() - c.t < 24 * 3600 * 1000) setCrashInfo(c);
+        }
+      } catch {}
+      setBooting(false);
+    })();
+  }, []);
+
+  useEffect(() => { AsyncStorage.setItem("nova.settings", JSON.stringify(settings)); }, [settings]);
+  useEffect(() => { AsyncStorage.setItem("nova.progress", JSON.stringify(progress)); }, [progress]);
+  useEffect(() => { AsyncStorage.setItem("nova.list", JSON.stringify(list)); }, [list]);
+
+  async function setSession(s: any) {
+    if (s) await SecureStore.setItemAsync("nova.session", JSON.stringify(s));
+    else await SecureStore.deleteItemAsync("nova.session");
+    setSessionState(s);
+    if (!s) { setItems([]); setEpMap({}); setNextUp([]); setFeatured(null); }
+  }
+
+  async function reloadLibrary() {
+    if (!session) return;
+    setLibLoading(true);
+    try {
+      const data = session.mode === "demo" ? demoLibrary() : await loadLibrary(session);
+      setItems(data.items); setEpMap(data.epMap || {}); setNextUp(data.nextUp || []);
+      setProgress((p: any) => ({ ...data.progress, ...p }));
+      setFeatured(pickFeatured(data.items, { ...data.progress, ...progress }, data.epMap || {}, list));
+    } catch (e: any) { Alert.alert("Errore libreria", e.message); await setSession(null); }
+    finally { setLibLoading(false); }
+  }
+
+  useEffect(() => { if (session) reloadLibrary(); }, [session ? session.token : null, session ? session.mode : null]);
+
+  const reshuffle = () => setFeatured(pickFeatured(items, progress, epMap, list));
+  const saveProgress = (id: string, pos: number, dur: number) => setProgress((p: any) => ({ ...p, [id]: { position: pos, duration: dur, updated: Date.now() } }));
+  const toggleList = (id: string) => setList(l => (l.includes(id) ? l.filter(x => x !== id) : [...l, id]));
+
+  async function resetLocal() {
+    await SecureStore.deleteItemAsync("nova.session");
+    const keys = await AsyncStorage.getAllKeys();
+    await AsyncStorage.multiRemove(keys.filter(k => k.startsWith("nova.")));
+    setSessionState(null); setItems([]); setEpMap({}); setNextUp([]); setProgress({}); setList([]); setSettings(defaultSettings); setFeatured(null); setCrashInfo(null);
+  }
+
+  const value = { session, setSession, items, epMap, nextUp, progress, saveProgress, list, toggleList, settings, setSettings, libLoading, reloadLibrary, resetLocal, featured, reshuffle };
+
+  if (booting) return <SafeAreaProvider><SafeAreaView style={styles.center}><Text style={styles.logo}>NOVA</Text><ActivityIndicator color={C.red} /></SafeAreaView></SafeAreaProvider>;
+
+  if (crashInfo) {
+    return (
+      <SafeAreaProvider>
+        <CrashReportScreen info={crashInfo} onDismiss={() => setCrashInfo(null)} onClear={() => { AsyncStorage.removeItem("nova.lastcrash"); setCrashInfo(null); }} />
+      </SafeAreaProvider>
+    );
+  }
+
+  return (
+    <SafeAreaProvider>
+      <AppCtx.Provider value={value}>
+        <PlayerProvider>
+          <View style={{ flex: 1, backgroundColor: C.bg }}>
+            <AppStatusBar />
+            {!session ? <LoginScreen /> : (
+              <NavigationContainer ref={navigationRef} theme={navTheme}>
+                <Stack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
+                  <Stack.Screen name="Home" component={HomeScreen} />
+                  <Stack.Screen name="Search" component={SearchScreen} />
+                  <Stack.Screen name="Detail" component={DetailScreen} />
+                  <Stack.Screen name="Settings" component={SettingsScreen} />
+                </Stack.Navigator>
+              </NavigationContainer>
+            )}
+            <PipMount />
+            <FloatingPlayer />
+          </View>
+        </PlayerProvider>
+      </AppCtx.Provider>
+    </SafeAreaProvider>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: C.bg },
+  center: { flex: 1, backgroundColor: C.bg, alignItems: "center", justifyContent: "center", padding: 24, gap: 12 },
+  muted: { color: C.muted, fontSize: 13 },
+  mutedSm: { color: C.muted, fontSize: 12, textAlign: "center" },
+  faint: { color: C.faint, fontSize: 12 },
+  emptyTitle: { color: C.text, fontSize: 20, fontWeight: "800" },
+  emptyTitleSm: { color: C.text, fontSize: 16, fontWeight: "800" },
+  logo: { fontSize: 56, fontWeight: "900", color: C.red, letterSpacing: 2 },
+  logoSub: { color: C.muted, letterSpacing: 4, textTransform: "uppercase", fontSize: 12, marginTop: -8, marginBottom: 16 },
+  loginScroll: { padding: 24, gap: 6 },
+  loginCard: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 18, padding: 22 },
+  loginCardTitle: { color: C.text, fontSize: 24, fontWeight: "800" },
+  loginCardSub: { color: C.muted, fontSize: 13, marginBottom: 8 },
+  label: { color: C.muted, fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6, marginTop: 12 },
+  input: { backgroundColor: "#0d0d12", borderColor: C.line, borderWidth: 1, borderRadius: 10, color: C.text, paddingHorizontal: 14, paddingVertical: 12 },
+  passWrap: { position: "relative", justifyContent: "center" },
+  eyeButton: { position: "absolute", right: 6, top: 0, bottom: 0, width: 42, alignItems: "center", justifyContent: "center" },
+  testButton: { alignSelf: "flex-start", backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 14, paddingVertical: 8, marginTop: 10 },
+  testButtonText: { color: C.muted, fontWeight: "700", fontSize: 12 },
+  status: { fontSize: 12, marginTop: 8 },
+  ok: { color: C.green },
+  bad: { color: "#ff6b72", marginTop: 8 },
+  primaryButton: { backgroundColor: C.red, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 20, alignItems: "center", justifyContent: "center", marginTop: 16 },
+  primaryButtonSm: { backgroundColor: C.red, borderRadius: 8, paddingVertical: 9, paddingHorizontal: 16, alignItems: "center" },
+  primaryButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+  secondaryButton: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingVertical: 12, paddingHorizontal: 18, alignItems: "center", justifyContent: "center" },
+  secondaryButtonSm: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 8, paddingVertical: 9, paddingHorizontal: 16, alignItems: "center" },
+  secondaryButtonText: { color: C.text, fontWeight: "800" },
+  fixButton: { backgroundColor: "#ffb22412", borderColor: "#ffb22455", borderWidth: 1, borderRadius: 10, paddingVertical: 11, alignItems: "center", justifyContent: "center", marginTop: 10 },
+  fixButtonText: { color: "#ffd58a", fontWeight: "800", fontSize: 13 },
+  divider: { flexDirection: "row", alignItems: "center", gap: 10, marginVertical: 16 },
+  dividerLine: { flex: 1, height: 1, backgroundColor: C.line },
+  dividerText: { color: C.faint, fontSize: 12 },
+  topBar: { paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
+  topLogo: { color: C.red, fontSize: 26, fontWeight: "900", letterSpacing: 1 },
+  iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
+  pressed: { backgroundColor: "#ffffff22" },
+  face: { backgroundColor: C.red, alignItems: "center", justifyContent: "center" },
+  profileMenu: { width: "88%", maxWidth: 400, backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
+  profileHead: { flexDirection: "row", alignItems: "center", gap: 14, padding: 18, borderBottomWidth: 1, borderBottomColor: C.line },
+  profileName: { color: C.text, fontSize: 18, fontWeight: "800", marginBottom: 3 },
+  hero: { height: 560, justifyContent: "flex-end" },
+  heroContent: { padding: 20, paddingBottom: 34 },
+  heroKickerRow: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 },
+  heroKicker: { color: C.muted, fontWeight: "800", letterSpacing: 2, fontSize: 12 },
+  shuffleBtn: { width: 30, height: 30, borderRadius: 15, backgroundColor: "#ffffff1a", alignItems: "center", justifyContent: "center" },
+  heroTitle: { color: C.text, fontSize: 42, fontWeight: "900", textTransform: "uppercase", marginBottom: 10 },
+  metaRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 4 },
+  match: { color: C.green, fontWeight: "800" },
+  metaText: { color: C.text, fontWeight: "600" },
+  badge: { color: C.muted, borderColor: C.faint, borderWidth: 1, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1, fontSize: 11, fontWeight: "700" },
+  heroDesc: { color: "#dadade", fontSize: 15, lineHeight: 22, marginBottom: 18 },
+  actions: { flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  whiteButton: { backgroundColor: "#fff", borderRadius: 8, paddingHorizontal: 16, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 8 },
+  whiteButtonText: { color: "#000", fontWeight: "800", fontSize: 14 },
+  ghostButton: { backgroundColor: "rgba(110,110,122,0.45)", borderRadius: 8, paddingHorizontal: 16, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 8 },
+  ghostButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+  rows: { marginTop: -20, paddingBottom: 40 },
+  row: { marginTop: 22 },
+  rowTitle: { color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
+  rowContent: { paddingHorizontal: 16 },
+  card: {},
+  cardPressed: { transform: [{ scale: 1.05 }], opacity: 0.9 },
+  poster: { borderRadius: 10, overflow: "hidden", backgroundColor: C.surface2, width: "100%" },
+  posterTall: { aspectRatio: 2 / 3 },
+  posterWide: { aspectRatio: 16 / 9 },
+  posterFallback: { padding: 12, justifyContent: "flex-end" },
+  posterFallbackTitle: { color: C.text, fontWeight: "900", fontSize: 16 },
+  epBadge: { position: "absolute", top: 8, left: 8, backgroundColor: "rgba(8,8,11,0.82)", borderRadius: 5, paddingHorizontal: 7, paddingVertical: 3 },
+  epBadgeText: { color: "#fff", fontWeight: "800", fontSize: 11 },
+  progressTrack: { position: "absolute", left: 0, right: 0, bottom: 0, height: 4, backgroundColor: "rgba(255,255,255,0.25)" },
+  progressFill: { height: "100%", backgroundColor: C.red },
+  wideLabel: { position: "absolute", left: 10, right: 10, bottom: 10 },
+  wideLabelTitle: { color: "#fff", fontWeight: "800", fontSize: 13 },
+  wideLabelSub: { color: "#d2d2d8", fontSize: 12 },
+  searchHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingTop: 10, gap: 8 },
+  searchInput: { flex: 1, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, color: C.text, paddingHorizontal: 16, paddingVertical: 10 },
+  grid: { padding: 16 },
+  gridItem: { flex: 1 / 3, maxWidth: "33.333%", paddingHorizontal: 5, marginBottom: 18 },
+  gridTitle: { color: C.muted, fontSize: 12, marginTop: 6 },
+  detailHero: { minHeight: 560, justifyContent: "flex-end" },
+  detailHeroContent: { padding: 20, paddingBottom: 34 },
+  detailTitle: { color: C.text, fontSize: 40, fontWeight: "900", textTransform: "uppercase", marginTop: 16, marginBottom: 10 },
+  detailBody: { padding: 20, paddingBottom: 90 },
+  inListNote: { color: C.green, fontSize: 12, fontWeight: "700", marginTop: 10 },
+  facts: { color: C.muted, fontSize: 13, marginBottom: 8 },
+  sectionTitle: { color: C.text, fontSize: 20, fontWeight: "800", marginTop: 18, marginBottom: 12 },
+  seasonHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
+  seasonChip: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 16, paddingVertical: 8, marginRight: 8 },
+  seasonChipOn: { backgroundColor: "#fff", borderColor: "#fff" },
+  seasonText: { color: C.muted, fontWeight: "800" },
+  seasonTextOn: { color: "#000" },
+  episode: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.08)" },
+  episodeNum: { color: C.faint, fontSize: 20, fontWeight: "800", width: 28, textAlign: "center" },
+  episodeThumb: { width: 130, aspectRatio: 16 / 9, borderRadius: 8, overflow: "hidden", backgroundColor: C.surface3 },
+  episodeTitle: { color: C.text, fontWeight: "800", fontSize: 15 },
+  episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3 },
+  similarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  similarItem: { width: "31%" },
+  roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
+  roundOn: { borderColor: C.green },
+  floatRoot: { ...StyleSheet.absoluteFillObject, zIndex: 100 },
+  infoPanelAbs: { position: "absolute", left: 0, right: 0, bottom: 0, backgroundColor: C.bg },
+  infoTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginBottom: 4 },
+  infoSub: { color: C.muted, fontSize: 13, marginBottom: 10 },
+  infoDesc: { color: "#d6d6de", fontSize: 14, lineHeight: 21, marginBottom: 12 },
+  statsInline: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 14 },
+  miniBar: { position: "absolute", left: 8, right: 8, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 12, overflow: "hidden", flexDirection: "row", alignItems: "center", paddingLeft: 6, paddingRight: 4 },
+  miniTitle: { color: C.text, fontWeight: "800", fontSize: 13 },
+  miniSub: { color: C.muted, fontSize: 11 },
+  miniProgress: { height: 3, backgroundColor: "rgba(255,255,255,0.18)" },
+  vTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 70 },
+  vBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 110 },
+  vTop: { position: "absolute", top: 4, left: 4, right: 4, flexDirection: "row", alignItems: "center", zIndex: 20 },
+  vBottom: { position: "absolute", left: 8, right: 8, bottom: 2, zIndex: 20 },
+  vControls: { flexDirection: "row", alignItems: "center", gap: 0 },
+  vError: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(6,6,9,0.94)", alignItems: "center", justifyContent: "center", padding: 16, gap: 10, zIndex: 40 },
+  subBox: { position: "absolute", left: 12, right: 12, alignItems: "center", zIndex: 15 },
+  subText: { textAlign: "center", borderRadius: 5, overflow: "hidden" },
+  centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -30, marginTop: -30, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 30 },
+  centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -36, marginTop: -36, width: 72, height: 72, alignItems: "center", justifyContent: "center", zIndex: 25 },
+  centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
+  playerTitle: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  playerTime: { color: "#fff", fontWeight: "700", fontSize: 12 },
+  hdButton: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+  hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 18, alignItems: "center", justifyContent: "center" },
+  hdText: { color: "#fff", fontWeight: "900", fontSize: 10, lineHeight: 12, textAlign: "center", includeFontPadding: false },
+  statsTitle: { color: C.green, fontWeight: "900", fontSize: 10, letterSpacing: 1.4, marginBottom: 5 },
+  statsLine: { color: "#d6d6de", fontSize: 11, lineHeight: 16 },
+  endLabel: { color: C.muted, textTransform: "uppercase", letterSpacing: 2, fontWeight: "800", fontSize: 11 },
+  nextCard: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 12, padding: 10, width: "100%" },
+  nextThumb: { width: 90, aspectRatio: 16 / 9, borderRadius: 6, backgroundColor: C.surface3 },
+  notice: { position: "absolute", alignSelf: "center", backgroundColor: "rgba(8,8,11,0.92)", borderColor: C.line, borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, maxWidth: "88%", zIndex: 120 },
+  noticeText: { color: C.text, fontSize: 12.5, fontWeight: "700", textAlign: "center" },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 16 },
+  menu: { backgroundColor: "rgba(16,16,22,0.99)", borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
+  menuItem: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
+  menuItemText: { color: C.text, fontSize: 14, fontWeight: "600", flex: 1, paddingRight: 10 },
+  menuValue: { color: C.green, fontWeight: "800" },
+  menuHeader: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 6, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: C.line },
+  menuHeaderText: { color: C.text, fontWeight: "800", fontSize: 15 },
+  menuNote: { color: C.faint, fontSize: 12, padding: 14, lineHeight: 17 },
+  switch: { width: 40, height: 22, borderRadius: 11, backgroundColor: "#3a3a46", padding: 2 },
+  switchOn: { backgroundColor: C.red },
+  switchKnob: { width: 18, height: 18, borderRadius: 9, backgroundColor: "#fff" },
+  switchKnobOn: { transform: [{ translateX: 18 }] },
+  pageTitle: { color: C.text, fontSize: 24, fontWeight: "800" },
+  settingsScroll: { padding: 16, paddingBottom: 90, gap: 16 },
+  settingsScrollWide: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start" },
+  settingsCard: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, padding: 18 },
+  halfCard: { width: "48%", flexGrow: 1 },
+  settingBlock: { marginVertical: 10 },
+  settingLabel: { color: C.text, fontWeight: "700", marginBottom: 8, flex: 1, paddingRight: 12 },
+  settingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12 },
+  choiceWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  choice: { backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, paddingHorizontal: 14, paddingVertical: 8 },
+  choiceOn: { backgroundColor: "#fff", borderColor: "#fff" },
+  choiceText: { color: C.muted, fontWeight: "800", fontSize: 12 },
+  choiceTextOn: { color: "#000" },
+  settingsActions: { gap: 10, marginTop: 14 }
+});
