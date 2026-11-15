@@ -1,1 +1,11 @@
-<manifest />
+<manifest>
+  <application>
+    <receiver
+      android:name="expo.modules.novapip.NovaMediaActions"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="expo.modules.novapip.AUDIO_ONLY" />
+      </intent-filter>
+    </receiver>
+  </application>
+</manifest>
