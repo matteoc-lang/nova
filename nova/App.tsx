@@ -105,7 +105,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="4.1.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="4.2.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -633,7 +633,7 @@ function PlayerProvider({ children }: any) {
     if (modeRef.current === "pip") return;
     const ok = await enterPip(player);
     if (ok) { setMode("pip"); setMenu(null); }
-    else flash("PiP non disponibile su questo dispositivo");
+    else flash("PiP non disponibile su questo dispositivo/build");
   }
 
   useEffect(() => {
@@ -664,7 +664,7 @@ function PlayerProvider({ children }: any) {
     const inf = infoRef.current;
     if (!inf || !stream) return;
     if (session.mode === "demo") { if (!silent) flash("Nessun sottotitolo nella demo."); return; }
-    if (!isTextSub(stream)) { if (!silent) flash("Sottotitoli grafici (PGS): servono i sottotitoli in formato testo."); return; }
+    if (!isTextSub(stream)) { if (!silent) flash("Sottotitoli grafici (PGS): non supportati senza transcoding."); return; }
     setSubLoading(true);
     if (!silent) flash("Carico i sottotitoli… il video continua.");
     try {
@@ -768,7 +768,7 @@ function PlayerProvider({ children }: any) {
     reportPlayback(session, "start", info, positionRef.current, false);
     const t = setInterval(() => reportPlayback(session, "progress", info, positionRef.current, !playingRef.current), 10000);
     return () => clearInterval(t);
-  }, [info && info.url]);
+  }, [info ? info.url : null]);
 
   useEffect(() => {
     if (mode !== "full" || !landscape || !controls || !playing || menu || loading) return;
@@ -961,7 +961,7 @@ function PlayerOverlay() {
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
 
   const videoBlock = (
-    <View style={[styles.videoBox, { width: vw, height: vh }]}>
+    <View style={[styles.videoBox, { width: vw, height: vh }]} {...pan.panHandlers}>
       <VideoView player={P.player} style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]} contentFit={isLandscape ? P.fit : "contain"} nativeControls={false} allowsPictureInPicture />
       <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
 
@@ -1489,7 +1489,6 @@ export default function App() {
     })();
   }, []);
 
-  /* Mostra l'ultimo crash registrato, così non dobbiamo indovinare */
   useEffect(() => {
     (async () => {
       try {
