@@ -1077,21 +1077,26 @@ const pan = useRef(PanResponder.create({
     textShadowOffset: { width: 0, height: 1 }
   };
 
-const surfaceStyle: any = mode === "pip"
+const MBH = 64;
+  const MBY = H - insets.bottom - MBH - 12;
+  const MW = 92, MH = 52, MX = 16, MY = MBY + 6;
+  const surfaceStyle: any = mode === "pip"
     ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
-    : isLand
-      ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", transform: [{ translateY: gY }, { scale: gS }] }
-      : {
-          position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
-          borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
-          transform: [
-            { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
-            { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
-            { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) },
-            { translateY: gY },
-            { scale: gS }
-          ]
-        };
+    : mode === "mini"
+      ? { position: "absolute", left: MX, top: MY, width: MW, height: MH, backgroundColor: "#000", overflow: "hidden", borderRadius: 10 }
+      : isLand
+        ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", transform: [{ translateY: gY }, { scale: gS }] }
+        : {
+            position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
+            borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 10], extrapolate: "clamp" }),
+            transform: [
+              { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
+              { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
+              { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) },
+              { translateY: gY },
+              { scale: gS }
+            ]
+          };
 
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
 
@@ -1199,10 +1204,10 @@ const surfaceStyle: any = mode === "pip"
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn, left: 10, right: 10, backgroundColor: "transparent", borderRadius: 14, overflow: "hidden" }]} {...miniPan.panHandlers}>
-        <View pointerEvents="none" style={{ position: "absolute", left: TW + 12, right: 0, top: 0, bottom: 0, backgroundColor: C.surface, borderTopRightRadius: 14, borderBottomRightRadius: 14 }} />
-        <View style={{ width: TW + 12 }} />
-        <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", paddingHorizontal: 10 }} onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}>
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: MBY, height: MBH, opacity: fadeIn, left: 10, right: 10, backgroundColor: "transparent", borderRadius: 14, overflow: "visible" }]} {...miniPan.panHandlers}>
+        <View pointerEvents="none" style={{ position: "absolute", left: MW + 12, right: 0, top: 0, bottom: 0, backgroundColor: C.surface, borderTopRightRadius: 14, borderBottomRightRadius: 14 }} />
+        <View style={{ width: MW + 12 }} />
+        <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", paddingRight: 6 }} onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}>
           <View style={{ flex: 1, paddingRight: 6 }}>
             <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
             <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
@@ -1210,8 +1215,8 @@ const surfaceStyle: any = mode === "pip"
         </Pressable>
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
-        <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]} pointerEvents="none">
-          <View style={[styles.progressFill, { width: pct + "%" }]} />
+        <View style={{ position: "absolute", left: MW + 12, right: 0, bottom: 0, height: 3, backgroundColor: C.surface3, borderBottomRightRadius: 14, overflow: "hidden" }} pointerEvents="none">
+          <View style={{ height: 3, width: pct + "%", backgroundColor: C.red }} />
         </View>
       </Animated.View>
 
@@ -1811,7 +1816,7 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, color: C.text, paddingHorizontal: 16, paddingVertical: 10 },
   grid: { padding: 16 },
   gridItem: { flex: 1 / 3, maxWidth: "33.333%", paddingHorizontal: 5, marginBottom: 18 },
-  gridTitle: { color: C.muted, fontSize: 12, marginTop: 6 },
+  gridTitle: { color: C.muted, fontSize: 12, marginTop: 6  backgroundColor: "rgba(8,8,12,0.88)", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignSelf: "flex-start", overflow: "hidden", marginBottom: 4, color: "#ffffff",},
   detailHero: { minHeight: 560, justifyContent: "flex-end" },
   detailHeroContent: { padding: 20, paddingBottom: 34 },
   detailTitle: { color: C.text, fontSize: 40, fontWeight: "900", textTransform: "uppercase", marginTop: 16, marginBottom: 10 },
@@ -1828,7 +1833,7 @@ const styles = StyleSheet.create({
   episodeNum: { color: C.faint, fontSize: 20, fontWeight: "800", width: 28, textAlign: "center" },
   episodeThumb: { width: 130, aspectRatio: 16 / 9, borderRadius: 8, overflow: "hidden", backgroundColor: C.surface3 },
   episodeTitle: { backgroundColor: "rgba(18,18,24,0.85)", paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, alignSelf: "flex-start", overflow: "hidden", color: C.text, fontWeight: "800", fontSize: 15 },
-  episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3 },
+  episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3  backgroundColor: "rgba(8,8,12,0.88)", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignSelf: "flex-start", overflow: "hidden", marginBottom: 4, color: "#d8d8e0",},
   similarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   similarItem: { width: "31%" },
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
