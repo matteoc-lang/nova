@@ -863,6 +863,20 @@ function PlayerProvider({ children }: any) {
     return () => { try { if (sub && sub.remove) sub.remove(); } catch {} };
   }, [player]);
 
+  useEffect(() => {
+    if (!NovaPip || typeof (NovaPip as any).addListener !== "function") return;
+    let sub: any = null;
+    try {
+      sub = (NovaPip as any).addListener("onPipAction", (e: any) => {
+        const a = String((e && (e.action || (e.nativeEvent && e.nativeEvent.action))) || "");
+        if (a === "audio") { try { NovaPip.exitPip(); } catch {} try { (player as any).staysActiveInBackground = true; } catch {} setMode("mini"); setControls(true); flash("Solo audio in background"); }
+        else if (a === "toggle") { togglePlay(); }
+        else if (a === "close") { close(); }
+      });
+    } catch {}
+    return () => { try { if (sub && sub.remove) sub.remove(); } catch {} };
+  }, [player]);
+
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
@@ -878,6 +892,9 @@ function FloatingPlayer() {
   const dim = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const m = useRef(new Animated.Value(0)).current;
+  const g = useRef(new Animated.Value(0)).current;
+  const gY = g.interpolate({ inputRange: [-1, 0, 1], outputRange: [-46, 0, 70], extrapolate: "clamp" });
+  const gS = g.interpolate({ inputRange: [-1, 0, 1], outputRange: [1.05, 1, 0.9], extrapolate: "clamp" });
   const mode = P.mode;
   const isLand = P.landscape || dim.width > dim.height;
   const audioOnly = !!P.audioOnly;
@@ -892,7 +909,7 @@ function FloatingPlayer() {
   const videoH = Math.min(W / aspect, H * 0.45);
   const fullY = insets.top;
   const miniBarH = 64;
-  const miniBarY = H - insets.bottom - miniBarH - 8;
+  const miniBarY = H - insets.bottom - miniBarH - 12;
   const TW = 96, TH = 54, TX = 14, TY = miniBarY + 5;
   const scaleMini = TW / W;
   const dxMini = TX + TW / 2 - W / 2;
@@ -936,33 +953,42 @@ function FloatingPlayer() {
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: dragThreshold,
-    onMoveShouldSetPanResponderCapture: dragThreshold,
-    onPanResponderMove: (_, g) => {
+    onMoveShouldSetPanResponder: (_, g2) => Math.abs(g2.dy) > 12 && Math.abs(g2.dy) > Math.abs(g2.dx) * 1.2,
+    onMoveShouldSetPanResponderCapture: (_, g2) => Math.abs(g2.dy) > 12 && Math.abs(g2.dy) > Math.abs(g2.dx) * 1.2,
+    onPanResponderMove: (_, g2) => {
       const G = gestureRefs.current;
-      if (!G.landscape && g.dy > 0) m.setValue(Math.min(1, g.dy / G.dist));
+      if (G.landscape) {
+        if (g2.dy > 0) g.setValue(Math.min(1, g2.dy / 300)); else g.setValue(0);
+      } else {
+        if (g2.dy > 0) { m.setValue(Math.min(1, g2.dy / G.dist)); g.setValue(0); }
+        else if (g2.dy < 0) { g.setValue(Math.max(-1, g2.dy / 300)); }
+      }
     },
-    onPanResponderRelease: (_, g) => {
+    onPanResponderRelease: (_, g2) => {
       const G = gestureRefs.current;
       videoDrag.current = Date.now();
-      const mm = Math.max(0, g.dy / G.dist);
-      if (g.dy < -60 || g.vy < -0.7) {
-        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
-        G.rotate();
-      } else if (!G.landscape && (mm > 0.6 || g.vy > 0.85)) {
-        Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start();
-        G.minimize();
-      } else if (!G.landscape && mm > 0.3 && G.pipOn) {
-        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
-        G.pip();
+      const mm = Math.max(0, g2.dy / G.dist);
+      if (G.landscape) {
+        if (g2.dy > 60 || g2.vy > 0.7) { Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate(); }
+        else Animated.spring(g, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        return;
+      }
+      if (g2.dy < -60 || g2.vy < -0.7) {
+        Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate();
+      } else if (mm > 0.6 || g2.vy > 0.85) {
+        Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start(); G.minimize();
+      } else if (mm > 0.3 && G.pipOn) {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true }).start(); G.pip();
       } else {
         Animated.spring(m, { toValue: G.mode === "mini" ? 1 : 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        Animated.spring(g, { toValue: 0, useNativeDriver: true }).start();
       }
     },
     onPanResponderTerminationRequest: () => true,
     onPanResponderTerminate: () => {
       videoDrag.current = Date.now();
       Animated.spring(m, { toValue: gestureRefs.current.mode === "mini" ? 1 : 0, useNativeDriver: true }).start();
+      Animated.spring(g, { toValue: 0, useNativeDriver: true }).start();
     }
   })).current;
 
@@ -1067,14 +1093,15 @@ function FloatingPlayer() {
   };
 
   const surfaceStyle: any = isLand
-    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
+    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", transform: [{ translateY: gY }, { scale: gS }] }
     : {
         position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
         borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
         transform: [
           { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
           { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
-          { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) }
+          { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) },
+          { translateY: gY }, { scale: gS }
         ]
       };
 
@@ -1097,7 +1124,7 @@ function FloatingPlayer() {
       <Animated.View style={surfaceStyle} {...pan.panHandlers}>
         <VideoView
           player={P.player}
-          style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
+          style={mode === "mini" ? { width: 1, height: 1, position: "absolute", opacity: 0, left: -10 } : [StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
           contentFit={isLand ? P.fit : "contain"}
           nativeControls={false}
           allowsPictureInPicture
@@ -1184,17 +1211,11 @@ function FloatingPlayer() {
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn, backgroundColor: "transparent" }]} {...miniPan.panHandlers}>
-        <View pointerEvents="none" style={{ position: "absolute", left: TW + 12, right: 0, top: 0, bottom: 0, backgroundColor: C.surface, borderTopRightRadius: 12, borderBottomRightRadius: 12 }} />
-        <Pressable
-          style={{ flexDirection: "row", alignItems: "center", flex: 1 }}
-          onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}
-        >
-          <View style={{ width: TW + 12, alignItems: "center", justifyContent: "center" }}>
-            {audioOnly && P.item ? (
-              <Image source={{ uri: P.item.poster }} resizeMode="cover" style={{ width: TW, height: Math.round(TW * 9 / 16), borderRadius: 6, backgroundColor: C.surface2 }} />
-            ) : null}
-          </View>
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn, left: 10, right: 10, backgroundColor: C.surface, borderRadius: 14, overflow: "hidden" }]} {...miniPan.panHandlers}>
+        {mode === "mini" ? (
+          <VideoView player={P.player} style={{ width: TW, height: miniBarH }} contentFit="cover" nativeControls={false} pointerEvents="none" />
+        ) : <View style={{ width: TW }} />}
+        <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", paddingHorizontal: 10 }} onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}>
           <View style={{ flex: 1, paddingRight: 6 }}>
             <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
             <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
@@ -1202,7 +1223,7 @@ function FloatingPlayer() {
         </Pressable>
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
-        <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]}>
+        <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]} pointerEvents="none">
           <View style={[styles.progressFill, { width: pct + "%" }]} />
         </View>
       </Animated.View>
@@ -1782,7 +1803,7 @@ const styles = StyleSheet.create({
   ghostButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
   rows: { marginTop: -20, paddingBottom: 40 },
   row: { marginTop: 22 },
-  rowTitle: { color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
+  rowTitle: { backgroundColor: "rgba(24,24,32,0.88)", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, alignSelf: "flex-start", overflow: "hidden", color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
   rowContent: { paddingHorizontal: 16 },
   card: {},
   cardPressed: { transform: [{ scale: 1.05 }], opacity: 0.9 },
