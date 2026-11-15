@@ -92,6 +92,14 @@ jobs:
         working-directory: nova
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
+      - name: Align React and React Native to the SDK-blessed pair
+        working-directory: nova
+        run: |
+          npx expo install --fix
+          npm install --no-audit --no-fund --legacy-peer-deps
+          echo "react         $(node -p "require('./node_modules/react/package.json').version")"
+          echo "react-native  $(node -p "require('./node_modules/react-native/package.json').version")"
+
       - name: Verify required packages
         working-directory: nova
         run: |
