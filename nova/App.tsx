@@ -59,7 +59,7 @@ function normalizeServer(value: string) {
 }
 
 function authHeaders(token?: string) {
-  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="6.1.0"';
+  const base = 'MediaBrowser Client="NOVA", Device="Android", DeviceId="nova-android", Version="6.2.0"';
   return { "Content-Type": "application/json", Authorization: token ? base + ', Token="' + token + '"' : base };
 }
 
@@ -413,7 +413,7 @@ function pickFeatured(items: any[], progress: any, epMap: any, list: string[]) {
 
 function IconButton({ name, onPress, size = 22, style, active }: any) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.iconButton, (pressed || active) && styles.pressed, style]}>
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.iconButton, pressed && styles.iconPressed, active && styles.iconActive, style]}>
       <Ionicons name={name} size={size} color={C.text} />
     </Pressable>
   );
@@ -461,7 +461,7 @@ function Row({ title, data, renderItem, keyExtractor }: any) {
 
 function MenuItem({ label, value, selected, disabled, onPress }: any) {
   return (
-    <Pressable onPress={disabled ? undefined : onPress} style={[styles.menuItem, disabled && { opacity: 0.45 }]}>
+    <Pressable onPress={disabled ? undefined : onPress} style={({ pressed }) => [styles.menuItem, pressed && styles.menuItemPressed, disabled && { opacity: 0.45 }]}>
       <Text style={styles.menuItemText}>{label}</Text>
       <Text style={styles.menuValue}>{selected ? "✓" : value || ""}</Text>
     </Pressable>
@@ -470,7 +470,7 @@ function MenuItem({ label, value, selected, disabled, onPress }: any) {
 
 function MenuToggle({ label, value, onToggle }: any) {
   return (
-    <Pressable onPress={onToggle} style={styles.menuItem}>
+    <Pressable onPress={onToggle} style={({ pressed }) => [styles.menuItem, pressed && styles.menuItemPressed]}>
       <Text style={styles.menuItemText}>{label}</Text>
       <View style={[styles.switch, value && styles.switchOn]}><View style={[styles.switchKnob, value && styles.switchKnobOn]} /></View>
     </Pressable>
@@ -552,7 +552,6 @@ function PlayerProvider({ children }: any) {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
 
-  /* Notifica now-playing di sistema (MediaStyle): copertina, barra, controlli. */
   useEffect(() => {
     try { (player as any).timeUpdateEventInterval = 0.25; } catch {}
     try { player.staysActiveInBackground = true; } catch {}
@@ -586,7 +585,7 @@ function PlayerProvider({ children }: any) {
     return () => { NavigationBar.setVisibilityAsync("visible").catch(() => {}); };
   }, [mode]);
 
-  /* PiP: stato letto dall'activity reale tramite il modulo nativo */
+  /* PiP: stato letto dall'activity reale + tastino "solo audio" dentro il PiP */
   useEffect(() => {
     if (!NovaPip || mode === "closed") return;
     const t = setInterval(() => {
@@ -594,6 +593,7 @@ function PlayerProvider({ children }: any) {
       try { inPip = !!NovaPip.isInPip(); } catch {}
       if (inPip && modeRef.current !== "pip") { setMode("pip"); setMenu(null); }
       else if (!inPip && modeRef.current === "pip") { setMode(pipReturn.current); setControls(true); }
+      try { if (NovaPip.takeAudioToggle && NovaPip.takeAudioToggle()) setAudioOnly(v => !v); } catch {}
     }, 500);
     return () => clearInterval(t);
   }, [mode === "closed"]);
@@ -811,10 +811,20 @@ function PlayerProvider({ children }: any) {
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
+/* In PiP la finestra mostra l'activity: teniamo il video a schermo intero lì dentro */
 function PipMount() {
   const P = usePlayer();
   if (P.mode !== "pip") return null;
-  return <VideoView player={P.player} style={{ width: 1, height: 1, position: "absolute", opacity: 0, left: -10 }} nativeControls={false} allowsPictureInPicture />;
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} allowsPictureInPicture />
+      {P.audioOnly && P.item ? (
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: "#000", alignItems: "center", justifyContent: "center" }]}>
+          <Image source={{ uri: P.item.poster }} style={{ width: "55%", aspectRatio: 1, borderRadius: 12, backgroundColor: C.surface2 }} />
+        </View>
+      ) : null}
+    </View>
+  );
 }
 
 function FloatingPlayer() {
@@ -848,12 +858,13 @@ function FloatingPlayer() {
   const fadeIn = m.interpolate({ inputRange: [0.5, 1], outputRange: [0, 1], extrapolate: "clamp" });
   const dimBehind = m.interpolate({ inputRange: [0, 1], outputRange: [0, 0.35], extrapolate: "clamp" });
 
-  const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, minimize: () => {}, rotate: () => {}, pip: () => {}, pipOn: true });
+  const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, minimize: () => {}, expand: () => {}, rotate: () => {}, pip: () => {}, pipOn: true });
   useEffect(() => {
     gestureRefs.current.landscape = isLand;
     gestureRefs.current.height = H;
     gestureRefs.current.dist = DIST || 1;
     gestureRefs.current.minimize = () => P.minimize();
+    gestureRefs.current.expand = () => P.expand();
     gestureRefs.current.rotate = () => P.rotate();
     gestureRefs.current.pip = () => P.requestPip("full");
     gestureRefs.current.pipOn = !!settings.pip;
@@ -892,7 +903,7 @@ function FloatingPlayer() {
     onMoveShouldSetPanResponder: (_, g) => g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx),
     onPanResponderMove: (_, g) => { if (g.dy < 0) m.setValue(Math.max(0, 1 + g.dy / 300)); },
     onPanResponderRelease: (_, g) => {
-      if (g.dy < -30 || g.vy < -0.5) Animated.timing(m, { toValue: 0, duration: 220, useNativeDriver: true }).start();
+      if (g.dy < -30 || g.vy < -0.5) gestureRefs.current.expand();
       else Animated.spring(m, { toValue: 1, useNativeDriver: true, friction: 8, tension: 70 }).start();
     },
     onPanResponderTerminate: () => Animated.spring(m, { toValue: 1, useNativeDriver: true }).start()
@@ -918,10 +929,10 @@ function FloatingPlayer() {
           <Text style={styles.badge}>{(P.info && P.info.method) || "—"}</Text>
         </View>
         <View style={[styles.actions, { marginVertical: 14 }]}>
-          <Pressable onPress={() => toggleList(P.item.id)} style={[styles.roundButton, inList && styles.roundOn]}>
+          <Pressable onPress={() => toggleList(P.item.id)} style={({ pressed }) => [styles.roundButton, pressed && styles.btnPressed, inList && styles.roundOn]}>
             <Ionicons name={inList ? "checkmark" : "add"} size={24} color={inList ? C.green : "#fff"} />
           </Pressable>
-          <Pressable onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }} style={styles.ghostButton}>
+          <Pressable onPress={() => { P.minimize(); if (navigationRef.isReady()) navigationRef.navigate("Detail", { itemId: P.item.id }); }} style={({ pressed }) => [styles.ghostButton, pressed && styles.btnPressed]}>
             <Ionicons name="information-circle-outline" size={20} color="#fff" /><Text style={styles.ghostButtonText}>Dettagli</Text>
           </Pressable>
         </View>
@@ -1020,8 +1031,8 @@ function FloatingPlayer() {
             <LinearGradient colors={["#1a070d", "#08080b"]} style={StyleSheet.absoluteFill} />
             <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
               <Image source={{ uri: P.item.poster }} style={{ width: "42%", aspectRatio: 1, borderRadius: 14, backgroundColor: C.surface2 }} />
-              <Text numberOfLines={1} style={{ color: C.text, fontWeight: "800", fontSize: 15, marginHorizontal: 18 }}>{title}</Text>
-              <Text numberOfLines={1} style={{ color: C.muted, fontSize: 11 }}>{subTitle}</Text>
+              <Text numberOfLines={1} style={{ color: C.text, fontWeight: "900", fontSize: 16, marginHorizontal: 18 }}>{title}</Text>
+              <Text numberOfLines={1} style={{ color: C.muted, fontSize: 12, fontWeight: "600" }}>{subTitle}</Text>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 <Ionicons name="headset" size={14} color={C.red} />
                 <Text style={{ color: C.red, fontWeight: "800", fontSize: 10, letterSpacing: 1 }}>MODALITÀ SOLO AUDIO</Text>
@@ -1041,7 +1052,7 @@ function FloatingPlayer() {
         {bigSpinner ? <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View> : null}
 
         {showControls && !bigSpinner && !P.ended && !P.error && mode === "full" ? (
-          <Pressable onPress={P.togglePlay} style={styles.centerPlay} hitSlop={26}>
+          <Pressable onPress={P.togglePlay} style={({ pressed }) => [styles.centerPlay, pressed && styles.btnPressed]} hitSlop={26}>
             <Ionicons name={P.playing ? "pause" : "play"} size={isLand ? 60 : 46} color="#fff" style={styles.centerIcon} />
           </Pressable>
         ) : null}
@@ -1068,8 +1079,10 @@ function FloatingPlayer() {
                 <Text style={styles.playerTime}>{fmt(P.scrubbing ? P.scrub : P.position)} <Text style={styles.faint}>/ {fmt(P.duration)}</Text></Text>
                 <View style={{ flex: 1 }} />
                 <IconButton name="musical-notes-outline" size={20} onPress={() => P.setMenu("audio")} />
-                <IconButton name="chatbox-ellipses-outline" size={20} active={P.subIndex != null} onPress={() => P.setMenu("subs")} />
-                <Pressable onPress={() => P.setMenu("quality")} style={styles.hdButton}><View style={styles.hdBox}><Text style={styles.hdText}>{P.info && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View></Pressable>
+                <IconButton name={P.subIndex != null ? "chatbox-ellipses" : "chatbox-ellipses-outline"} size={20} onPress={() => P.setMenu("subs")} />
+                <Pressable onPress={() => P.setMenu("quality")} style={({ pressed }) => [styles.hdButton, pressed && styles.btnPressed]}>
+                  <View style={styles.hdBox}><Text style={styles.hdText}>{P.info && P.info.quality !== "auto" ? P.info.quality + "p" : "HD"}</Text></View>
+                </Pressable>
                 <IconButton name="settings-outline" size={20} onPress={() => P.setMenu("root")} />
                 {settings.rotateBottom ? rotateBtn : null}
               </View>
@@ -1083,8 +1096,8 @@ function FloatingPlayer() {
             <Text style={styles.emptyTitleSm}>Video non caricabile</Text>
             <Text style={styles.mutedSm}>{P.error}</Text>
             <View style={styles.actions}>
-              <Pressable onPress={() => P.setQuality("auto")} style={styles.primaryButtonSm}><Text style={styles.primaryButtonText}>Riprova</Text></Pressable>
-              <Pressable onPress={P.close} style={styles.secondaryButtonSm}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
+              <Pressable onPress={() => P.setQuality("auto")} style={({ pressed }) => [styles.primaryButtonSm, pressed && styles.btnPressed]}><Text style={styles.primaryButtonText}>Riprova</Text></Pressable>
+              <Pressable onPress={P.close} style={({ pressed }) => [styles.secondaryButtonSm, pressed && styles.btnPressed]}><Text style={styles.secondaryButtonText}>Chiudi</Text></Pressable>
             </View>
           </View>
         ) : null}
@@ -1093,26 +1106,28 @@ function FloatingPlayer() {
           <View style={styles.vError}>
             <Text style={styles.endLabel}>{P.nextEp ? "Prossimo episodio" : "Fine"}</Text>
             {P.nextEp ? (
-              <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.nextCard}>
+              <Pressable onPress={() => P.playEpisode(P.nextEp)} style={({ pressed }) => [styles.nextCard, pressed && styles.btnPressed]}>
                 <View style={styles.nextThumb} />
                 <View style={{ flex: 1 }}><Text style={styles.episodeTitle}>S{P.nextEp.season}:E{P.nextEp.episode} · {P.nextEp.title}</Text><Text style={styles.mutedSm}>{P.item.title}</Text></View>
               </Pressable>
             ) : null}
             <View style={styles.actions}>
-              {P.nextEp ? <Pressable onPress={() => P.playEpisode(P.nextEp)} style={styles.whiteButton}><Ionicons name="play" size={18} color="#000" /><Text style={styles.whiteButtonText}>Guarda</Text></Pressable> : null}
-              <Pressable onPress={() => P.endScrub(0)} style={styles.ghostButton}><Ionicons name="refresh" size={18} color="#fff" /><Text style={styles.ghostButtonText}>Riguarda</Text></Pressable>
-              <Pressable onPress={P.close} style={styles.ghostButton}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
+              {P.nextEp ? <Pressable onPress={() => P.playEpisode(P.nextEp)} style={({ pressed }) => [styles.whiteButton, pressed && styles.btnPressed]}><Ionicons name="play" size={18} color="#000" /><Text style={styles.whiteButtonText}>Guarda</Text></Pressable> : null}
+              <Pressable onPress={() => P.endScrub(0)} style={({ pressed }) => [styles.ghostButton, pressed && styles.btnPressed]}><Ionicons name="refresh" size={18} color="#fff" /><Text style={styles.ghostButtonText}>Riguarda</Text></Pressable>
+              <Pressable onPress={P.close} style={({ pressed }) => [styles.ghostButton, pressed && styles.btnPressed]}><Text style={styles.ghostButtonText}>Chiudi</Text></Pressable>
             </View>
           </View>
         ) : null}
       </Animated.View>
 
       <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...(!isLand ? miniPan.panHandlers : {})}>
-        <View style={{ width: TW + 12 }} />
-        <View style={{ flex: 1, paddingRight: 6 }}>
-          <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
-          <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
-        </View>
+        <Pressable style={({ pressed }) => [styles.miniTapArea, pressed && { opacity: 0.7 }]} onPress={P.expand}>
+          <View style={{ width: TW + 12 }} />
+          <View style={{ flex: 1, paddingRight: 6 }}>
+            <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
+            <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
+          </View>
+        </Pressable>
         <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
@@ -1243,20 +1258,20 @@ function LoginScreen() {
           <Text style={styles.loginCardSub}>Connettiti al tuo server Jellyfin.</Text>
           <Text style={styles.label}>Server</Text>
           <TextInput value={server} onChangeText={setServer} placeholder="http://192.168.1.10:8096" placeholderTextColor={C.faint} autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} />
-          <Pressable onPress={doTest} style={styles.testButton}><Text style={styles.testButtonText}>Test connessione</Text></Pressable>
+          <Pressable onPress={doTest} style={({ pressed }) => [styles.testButton, pressed && styles.btnPressed]}><Text style={styles.testButtonText}>Test connessione</Text></Pressable>
           {status ? <Text style={[styles.status, status.startsWith("✓") ? styles.ok : styles.bad]}>{status}</Text> : null}
           <Text style={styles.label}>Utente</Text>
           <TextInput value={user} onChangeText={setUser} autoCapitalize="none" autoCorrect={false} style={styles.input} />
           <Text style={styles.label}>Password</Text>
           <View style={styles.passWrap}>
             <TextInput value={pass} onChangeText={setPass} secureTextEntry={!showPass} autoCapitalize="none" autoCorrect={false} autoComplete="off" importantForAutofill="no" style={[styles.input, { paddingRight: 50 }]} />
-            <Pressable onPress={() => setShowPass(v => !v)} style={styles.eyeButton}><Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} /></Pressable>
+            <Pressable onPress={() => setShowPass(v => !v)} style={({ pressed }) => [styles.eyeButton, pressed && { opacity: 0.6 }]}><Ionicons name={showPass ? "eye-off-outline" : "eye-outline"} size={22} color={C.muted} /></Pressable>
           </View>
           {err ? <Text style={styles.bad}>{err}</Text> : null}
-          <Pressable onPress={doLogin} disabled={busy} style={[styles.primaryButton, busy && { opacity: 0.6 }]}><Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text></Pressable>
+          <Pressable onPress={doLogin} disabled={busy} style={({ pressed }) => [styles.primaryButton, pressed && styles.btnPressed, busy && { opacity: 0.6 }]}><Text style={styles.primaryButtonText}>{busy ? "Accesso…" : "Accedi"}</Text></Pressable>
           <View style={styles.divider}><View style={styles.dividerLine} /><Text style={styles.dividerText}>oppure</Text><View style={styles.dividerLine} /></View>
-          <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Esplora la demo</Text></Pressable>
-          <Pressable onPress={resetLocal} style={styles.fixButton}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
+          <Pressable onPress={() => setSession({ mode: "demo", user: "Matteo" })} style={({ pressed }) => [styles.secondaryButton, pressed && styles.btnPressed]}><Text style={styles.secondaryButtonText}>Esplora la demo</Text></Pressable>
+          <Pressable onPress={resetLocal} style={({ pressed }) => [styles.fixButton, pressed && styles.btnPressed]}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -1314,8 +1329,9 @@ function HomeScreen() {
   const myList = useMemo(() => items.filter((i: any) => list.includes(i.id)), [items, list]);
   const goDetail = (id: string) => navigationRef.navigate("Detail", { itemId: id });
 
-  if (libLoading) return <SafeAreaView style={styles.center}><ActivityIndicator color={C.red} size="large" /><Text style={styles.muted}>Carico la libreria…</Text></SafeAreaView>;
-  if (!featured) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Libreria vuota</Text></SafeAreaView>;
+  if (libLoading && !items.length) return <SafeAreaView style={styles.center}><ActivityIndicator color={C.red} size="large" /><Text style={styles.muted}>Carico la libreria…</Text></SafeAreaView>;
+  if (!featured && !items.length) return <SafeAreaView style={styles.center}><Text style={styles.emptyTitle}>Libreria vuota</Text></SafeAreaView>;
+  if (!featured) return null;
 
   return (
     <View style={styles.screen}>
@@ -1325,13 +1341,13 @@ function HomeScreen() {
           {featured.backdrop ? <ImageBackground source={{ uri: featured.backdrop }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : <View style={[StyleSheet.absoluteFill, { backgroundColor: "hsl(" + featured.hue + ",55%,22%)" }]} />}
           <LinearGradient colors={["rgba(8,8,11,0.15)", "rgba(8,8,11,0.75)", C.bg]} style={StyleSheet.absoluteFill} />
           <View style={styles.heroContent}>
-            <View style={styles.heroKickerRow}><Text style={styles.heroKicker}>CONSIGLIATO PER TE</Text><Pressable onPress={reshuffle} style={styles.shuffleBtn}><Ionicons name="shuffle" size={16} color={C.muted} /></Pressable></View>
+            <View style={styles.heroKickerRow}><Text style={styles.heroKicker}>CONSIGLIATO PER TE</Text><Pressable onPress={reshuffle} style={({ pressed }) => [styles.shuffleBtn, pressed && styles.btnPressed]}><Ionicons name="shuffle" size={16} color={C.muted} /></Pressable></View>
             <Text style={styles.heroTitle}>{featured.title}</Text>
             <View style={styles.metaRow}><Text style={styles.match}>{featured.match}% compatibile</Text><Text style={styles.metaText}>{featured.year}</Text><Text style={styles.badge}>HD</Text></View>
             <Text numberOfLines={3} style={styles.heroDesc}>{featured.overview}</Text>
             <View style={styles.actions}>
-              <Pressable onPress={() => P.open(featured)} style={styles.whiteButton}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text></Pressable>
-              <Pressable onPress={() => goDetail(featured.id)} style={styles.ghostButton}><Ionicons name="information-circle-outline" size={22} color="#fff" /><Text style={styles.ghostButtonText}>Info</Text></Pressable>
+              <Pressable onPress={() => P.open(featured)} style={({ pressed }) => [styles.whiteButton, pressed && styles.btnPressed]}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>Play</Text></Pressable>
+              <Pressable onPress={() => goDetail(featured.id)} style={({ pressed }) => [styles.ghostButton, pressed && styles.btnPressed]}><Ionicons name="information-circle-outline" size={22} color="#fff" /><Text style={styles.ghostButtonText}>Info</Text></Pressable>
             </View>
           </View>
         </View>
@@ -1381,7 +1397,7 @@ function DetailScreen({ route }: any) {
   const cur = seasons.find((s: any) => s.n === season) || seasons[0];
   const ep = item.type === "series" ? targetEpisode(seasons, progress) : null;
   const resume = ep ? (progress[ep.id] ? progress[ep.id].position || 0 : 0) : (progress[item.id] ? progress[item.id].position || 0 : 0);
-  const similar = items.filter((x: any) => x.id !== item.id && x.genres.some((g: string) => item.genres.includes(g))).slice(0, 8);
+  const similar = items.filter((x: any) => x.id !== item.id && x.genres.some((g: string) => item.genres.includes(g))).slice(0, 9);
   const inList = list.includes(item.id);
 
   return (
@@ -1395,8 +1411,8 @@ function DetailScreen({ route }: any) {
           <View style={styles.metaRow}><Text style={styles.match}>{item.match}% compatibile</Text><Text style={styles.metaText}>{item.year}</Text><Text style={styles.badge}>{item.rating}</Text></View>
           <Text numberOfLines={4} style={styles.heroDesc}>{item.overview}</Text>
           <View style={styles.actions}>
-            <Pressable onPress={() => P.open(item, ep)} style={styles.whiteButton}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text></Pressable>
-            <Pressable onPress={() => toggleList(item.id)} style={[styles.roundButton, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={26} color={inList ? C.green : "#fff"} /></Pressable>
+            <Pressable onPress={() => P.open(item, ep)} style={({ pressed }) => [styles.whiteButton, pressed && styles.btnPressed]}><Ionicons name="play" size={22} color="#000" /><Text style={styles.whiteButtonText}>{resume > 0 ? "Riprendi" : "Play"}</Text></Pressable>
+            <Pressable onPress={() => toggleList(item.id)} style={({ pressed }) => [styles.roundButton, pressed && styles.btnPressed, inList && styles.roundOn]}><Ionicons name={inList ? "checkmark" : "add"} size={26} color={inList ? C.green : "#fff"} /></Pressable>
           </View>
           {inList ? <Text style={styles.inListNote}>Nella tua lista</Text> : null}
         </SafeAreaView>
@@ -1408,13 +1424,13 @@ function DetailScreen({ route }: any) {
           <>
             <View style={styles.seasonHeader}><Text style={styles.sectionTitle}>Episodi</Text>{loading ? <ActivityIndicator color={C.red} /> : null}</View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
-              {seasons.map((s: any) => <Pressable key={s.n} onPress={() => setSeason(s.n)} style={[styles.seasonChip, cur && cur.n === s.n ? styles.seasonChipOn : null]}><Text style={[styles.seasonText, cur && cur.n === s.n ? styles.seasonTextOn : null]}>{s.name}</Text></Pressable>)}
+              {seasons.map((s: any) => <Pressable key={s.n} onPress={() => setSeason(s.n)} style={({ pressed }) => [styles.seasonChip, pressed && styles.btnPressed, cur && cur.n === s.n ? styles.seasonChipOn : null]}><Text style={[styles.seasonText, cur && cur.n === s.n ? styles.seasonTextOn : null]}>{s.name}</Text></Pressable>)}
             </ScrollView>
             {(cur && cur.episodes ? cur.episodes : []).map((e: any) => {
               const p = progress[e.id];
               const pc = p && p.duration ? Math.min(100, (p.position / p.duration) * 100) : 0;
               return (
-                <Pressable key={e.id} onPress={() => P.open(item, e)} style={styles.episode}>
+                <Pressable key={e.id} onPress={() => P.open(item, e)} style={({ pressed }) => [styles.episode, pressed && { backgroundColor: "#ffffff08" }]}>
                   <Text style={styles.episodeNum}>{e.episode}</Text>
                   <View style={styles.episodeThumb}><Image source={{ uri: e.thumb }} style={StyleSheet.absoluteFill} />{pc > 0 ? <View style={styles.progressTrack}><View style={[styles.progressFill, { width: pc + "%" }]} /></View> : null}</View>
                   <View style={{ flex: 1 }}><Text style={styles.episodeTitle}>{e.title}</Text><Text numberOfLines={2} style={styles.episodeDesc}>{e.overview}</Text></View>
@@ -1441,13 +1457,13 @@ function Choice({ label, value, options, onChange }: any) {
   return (
     <View style={styles.settingBlock}>
       <Text style={styles.settingLabel}>{label}</Text>
-      <View style={styles.choiceWrap}>{options.map((o: any) => <Pressable key={o[0]} onPress={() => onChange(o[0])} style={[styles.choice, String(value) === String(o[0]) ? styles.choiceOn : null]}><Text style={[styles.choiceText, String(value) === String(o[0]) ? styles.choiceTextOn : null]}>{o[1]}</Text></Pressable>)}</View>
+      <View style={styles.choiceWrap}>{options.map((o: any) => <Pressable key={o[0]} onPress={() => onChange(o[0])} style={({ pressed }) => [styles.choice, pressed && styles.btnPressed, String(value) === String(o[0]) ? styles.choiceOn : null]}><Text style={[styles.choiceText, String(value) === String(o[0]) ? styles.choiceTextOn : null]}>{o[1]}</Text></Pressable>)}</View>
     </View>
   );
 }
 
 function Toggle({ label, value, onToggle }: any) {
-  return <Pressable onPress={onToggle} style={styles.settingRow}><Text style={styles.settingLabel}>{label}</Text><View style={[styles.switch, value ? styles.switchOn : null]}><View style={[styles.switchKnob, value ? styles.switchKnobOn : null]} /></View></Pressable>;
+  return <Pressable onPress={onToggle} style={({ pressed }) => [styles.settingRow, pressed && { opacity: 0.8 }]}><Text style={styles.settingLabel}>{label}</Text><View style={[styles.switch, value ? styles.switchOn : null]}><View style={[styles.switchKnob, value ? styles.switchKnobOn : null]} /></View></Pressable>;
 }
 
 function SettingsScreen() {
@@ -1500,10 +1516,10 @@ function SettingsScreen() {
           <Text style={styles.sectionTitle}>Server</Text>
           <Text style={styles.muted}>{session.mode === "demo" ? "Modalità demo" : session.server}</Text>
           <View style={styles.settingsActions}>
-            <Pressable onPress={reloadLibrary} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Ricarica libreria</Text></Pressable>
-            <Pressable onPress={doTest} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Test server</Text></Pressable>
-            <Pressable onPress={() => setSession(null)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Esci</Text></Pressable>
-            <Pressable onPress={resetLocal} style={styles.fixButton}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
+            <Pressable onPress={reloadLibrary} style={({ pressed }) => [styles.secondaryButton, pressed && styles.btnPressed]}><Text style={styles.secondaryButtonText}>Ricarica libreria</Text></Pressable>
+            <Pressable onPress={doTest} style={({ pressed }) => [styles.secondaryButton, pressed && styles.btnPressed]}><Text style={styles.secondaryButtonText}>Test server</Text></Pressable>
+            <Pressable onPress={() => setSession(null)} style={({ pressed }) => [styles.secondaryButton, pressed && styles.btnPressed]}><Text style={styles.secondaryButtonText}>Esci</Text></Pressable>
+            <Pressable onPress={resetLocal} style={({ pressed }) => [styles.fixButton, pressed && styles.btnPressed]}><Text style={styles.fixButtonText}>Ripara dati locali</Text></Pressable>
           </View>
         </View>
       </ScrollView>
@@ -1521,8 +1537,8 @@ function CrashReportScreen({ info, onDismiss, onClear }: any) {
           <Text style={{ color: C.text, fontSize: 14, fontWeight: "800", marginBottom: 6 }}>{info.msg}</Text>
           <Text style={{ color: C.muted, fontSize: 11, lineHeight: 16 }}>{info.stack}</Text>
         </View>
-        <Pressable onPress={onDismiss} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Avvia NOVA comunque</Text></Pressable>
-        <Pressable onPress={onClear} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Cancella registro e avvia</Text></Pressable>
+        <Pressable onPress={onDismiss} style={({ pressed }) => [styles.primaryButton, pressed && styles.btnPressed]}><Text style={styles.primaryButtonText}>Avvia NOVA comunque</Text></Pressable>
+        <Pressable onPress={onClear} style={({ pressed }) => [styles.secondaryButton, pressed && styles.btnPressed]}><Text style={styles.secondaryButtonText}>Cancella registro e avvia</Text></Pressable>
       </ScrollView>
     </SafeAreaView>
   );
@@ -1543,6 +1559,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      let prog: any = {}, lst: string[] = [];
       try {
         const s = await SecureStore.getItemAsync("nova.session");
         const st = await AsyncStorage.getItem("nova.settings");
@@ -1550,8 +1567,21 @@ export default function App() {
         const li = await AsyncStorage.getItem("nova.list");
         if (s) setSessionState(JSON.parse(s));
         if (st) setSettings({ ...defaultSettings, ...JSON.parse(st) });
-        if (pr) setProgress(JSON.parse(pr));
-        if (li) setList(JSON.parse(li));
+        if (pr) { prog = JSON.parse(pr); setProgress(prog); }
+        if (li) { lst = JSON.parse(li); setList(lst); }
+      } catch {}
+      /* Cache libreria: apertura istantanea, aggiornamento in background */
+      try {
+        const lc = await AsyncStorage.getItem("nova.libcache");
+        if (lc) {
+          const c = JSON.parse(lc);
+          if (c && Array.isArray(c.items) && c.items.length && (!c.t || Date.now() - c.t < 30 * 86400000)) {
+            setItems(c.items);
+            setEpMap(c.epMap || {});
+            setNextUp(c.nextUp || []);
+            setFeatured(pickFeatured(c.items, prog, c.epMap || {}, lst));
+          }
+        }
       } catch {}
       try {
         const raw = await AsyncStorage.getItem("nova.lastcrash");
@@ -1577,14 +1607,18 @@ export default function App() {
 
   async function reloadLibrary() {
     if (!session) return;
-    setLibLoading(true);
+    if (!items.length) setLibLoading(true);
     try {
       const data = session.mode === "demo" ? demoLibrary() : await loadLibrary(session);
       setItems(data.items); setEpMap(data.epMap || {}); setNextUp(data.nextUp || []);
       setProgress((p: any) => ({ ...data.progress, ...p }));
       setFeatured(pickFeatured(data.items, { ...data.progress, ...progress }, data.epMap || {}, list));
-    } catch (e: any) { Alert.alert("Errore libreria", e.message); await setSession(null); }
-    finally { setLibLoading(false); }
+      try {
+        AsyncStorage.setItem("nova.libcache", JSON.stringify({ items: data.items, epMap: data.epMap || {}, nextUp: data.nextUp || [], t: Date.now() })).catch(() => {});
+      } catch {}
+    } catch (e: any) {
+      if (!items.length) { Alert.alert("Errore libreria", e.message); await setSession(null); }
+    } finally { setLibLoading(false); }
   }
 
   useEffect(() => { if (session) reloadLibrary(); }, [session ? session.token : null, session ? session.mode : null]);
@@ -1674,7 +1708,10 @@ const styles = StyleSheet.create({
   topBar: { paddingHorizontal: 16, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: C.bg },
   topLogo: { color: C.red, fontSize: 26, fontWeight: "900", letterSpacing: 1 },
   iconButton: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
-  pressed: { backgroundColor: "#ffffff22" },
+  iconPressed: { backgroundColor: "#ffffff22", transform: [{ scale: 0.86 }] },
+  iconActive: { backgroundColor: "#ffffff30" },
+  btnPressed: { opacity: 0.8, transform: [{ scale: 0.96 }] },
+  menuItemPressed: { backgroundColor: "#ffffff12" },
   face: { backgroundColor: C.red, alignItems: "center", justifyContent: "center" },
   profileMenu: { width: "88%", maxWidth: 400, backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 16, overflow: "hidden" },
   profileHead: { flexDirection: "row", alignItems: "center", gap: 14, padding: 18, borderBottomWidth: 1, borderBottomColor: C.line },
@@ -1711,8 +1748,8 @@ const styles = StyleSheet.create({
   progressTrack: { position: "absolute", left: 0, right: 0, bottom: 0, height: 4, backgroundColor: "rgba(255,255,255,0.25)" },
   progressFill: { height: "100%", backgroundColor: C.red },
   wideLabel: { position: "absolute", left: 10, right: 10, bottom: 10 },
-  wideLabelTitle: { color: "#fff", fontWeight: "800", fontSize: 13 },
-  wideLabelSub: { color: "#d2d2d8", fontSize: 12 },
+  wideLabelTitle: { color: "#fff", fontWeight: "800", fontSize: 13, textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
+  wideLabelSub: { color: "#e6e6ea", fontSize: 12, fontWeight: "600", textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
   searchHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingTop: 10, gap: 8 },
   searchInput: { flex: 1, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, color: C.text, paddingHorizontal: 16, paddingVertical: 10 },
   grid: { padding: 16 },
@@ -1733,21 +1770,22 @@ const styles = StyleSheet.create({
   episode: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.08)" },
   episodeNum: { color: C.faint, fontSize: 20, fontWeight: "800", width: 28, textAlign: "center" },
   episodeThumb: { width: 130, aspectRatio: 16 / 9, borderRadius: 8, overflow: "hidden", backgroundColor: C.surface3 },
-  episodeTitle: { color: C.text, fontWeight: "800", fontSize: 15 },
-  episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3 },
-  similarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
-  similarItem: { width: "31%" },
+  episodeTitle: { color: C.text, fontWeight: "800", fontSize: 16 },
+  episodeDesc: { color: C.muted, fontSize: 12.5, marginTop: 3, lineHeight: 17 },
+  similarGrid: { flexDirection: "row", flexWrap: "wrap" },
+  similarItem: { width: "33.333%", paddingHorizontal: 6, marginBottom: 12 },
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
   roundOn: { borderColor: C.green },
   floatRoot: { ...StyleSheet.absoluteFillObject, zIndex: 100 },
   infoPanelAbs: { position: "absolute", left: 0, right: 0, bottom: 0, backgroundColor: C.bg },
-  infoTitle: { color: C.text, fontSize: 21, fontWeight: "800", marginBottom: 4 },
-  infoSub: { color: C.muted, fontSize: 13, marginBottom: 10 },
-  infoDesc: { color: "#d6d6de", fontSize: 14, lineHeight: 21, marginBottom: 12 },
+  infoTitle: { color: C.text, fontSize: 24, fontWeight: "900", marginBottom: 4, letterSpacing: 0.2 },
+  infoSub: { color: C.muted, fontSize: 14, fontWeight: "600", marginBottom: 10 },
+  infoDesc: { color: "#d6d6de", fontSize: 15, lineHeight: 22, marginBottom: 12 },
   statsInline: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 14 },
   miniBar: { position: "absolute", left: 8, right: 8, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 12, overflow: "hidden", flexDirection: "row", alignItems: "center", paddingLeft: 6, paddingRight: 4 },
-  miniTitle: { color: C.text, fontWeight: "800", fontSize: 13 },
-  miniSub: { color: C.muted, fontSize: 11 },
+  miniTapArea: { flexDirection: "row", alignItems: "center", flex: 1 },
+  miniTitle: { color: C.text, fontWeight: "800", fontSize: 14 },
+  miniSub: { color: C.muted, fontSize: 11.5, fontWeight: "600" },
   miniProgress: { height: 3, backgroundColor: "rgba(255,255,255,0.18)" },
   vTopScrim: { position: "absolute", top: 0, left: 0, right: 0, height: 70 },
   vBottomScrim: { position: "absolute", bottom: 0, left: 0, right: 0, height: 110 },
@@ -1760,7 +1798,7 @@ const styles = StyleSheet.create({
   centerSpin: { position: "absolute", left: "50%", top: "50%", marginLeft: -30, marginTop: -30, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 30 },
   centerPlay: { position: "absolute", left: "50%", top: "50%", marginLeft: -36, marginTop: -36, width: 72, height: 72, alignItems: "center", justifyContent: "center", zIndex: 25 },
   centerIcon: { textShadowColor: "rgba(0,0,0,0.85)", textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 10 },
-  playerTitle: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  playerTitle: { color: "#fff", fontWeight: "800", fontSize: 17, textShadowColor: "#000", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4 },
   playerTime: { color: "#fff", fontWeight: "700", fontSize: 12 },
   hdButton: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
   hdBox: { borderWidth: 1.5, borderColor: "#fff", borderRadius: 4, paddingHorizontal: 4, height: 18, alignItems: "center", justifyContent: "center" },
