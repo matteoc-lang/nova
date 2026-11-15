@@ -57,9 +57,28 @@ jobs:
 
       - name: Remove UTF-8 BOM from source files
         run: |
-          find nova -type f \( -name '*.json' -o -name '*.js' -o -name '*.cjs' -o -name '*.mjs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.svg' \)
-            -not -path '*/node_modules/*' -print0 \
-          | xargs -0 -r sed -i '1s/^\xEF\xBB\xBF//'
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const exts = [".json", ".js", ".cjs", ".mjs", ".ts", ".tsx", ".svg"];
+            let n = 0;
+            function walk(dir) {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (entry.name === "node_modules" || entry.name === ".git") continue;
+                const p = path.join(dir, entry.name);
+                if (entry.isDirectory()) { walk(p); continue; }
+                if (!exts.includes(path.extname(entry.name))) continue;
+                const s = fs.readFileSync(p, "utf8");
+                if (s.charCodeAt(0) === 0xFEFF) {
+                  fs.writeFileSync(p, s.slice(1), "utf8");
+                  n++;
+                  console.log("BOM rimosso da " + p);
+                }
+              }
+            }
+            walk("nova");
+            console.log("File corretti: " + n);
+          '
 
       - name: Validate JSON files
         run: |
