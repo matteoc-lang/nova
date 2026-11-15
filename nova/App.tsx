@@ -881,9 +881,7 @@ function PlayerProvider({ children }: any) {
 }
 
 function PipMount() {
-  const P = usePlayer();
-  if (P.mode !== "pip") return null;
-  return <VideoView player={P.player} style={{ width: 1, height: 1, position: "absolute", opacity: 0, left: -10 }} nativeControls={false} allowsPictureInPicture />;
+  return null;
 }
 
 function FloatingPlayer() {
@@ -951,45 +949,32 @@ function FloatingPlayer() {
     return G.landscape ? g.dy < 0 : true;
   };
 
-  const pan = useRef(PanResponder.create({
+const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: (_, g2) => Math.abs(g2.dy) > 12 && Math.abs(g2.dy) > Math.abs(g2.dx) * 1.2,
-    onMoveShouldSetPanResponderCapture: (_, g2) => Math.abs(g2.dy) > 12 && Math.abs(g2.dy) > Math.abs(g2.dx) * 1.2,
-    onPanResponderMove: (_, g2) => {
+    onMoveShouldSetPanResponder: (_, gg) => Math.abs(gg.dy) > 12 && Math.abs(gg.dy) > Math.abs(gg.dx) * 1.2,
+    onMoveShouldSetPanResponderCapture: (_, gg) => Math.abs(gg.dy) > 12 && Math.abs(gg.dy) > Math.abs(gg.dx) * 1.2,
+    onPanResponderMove: (_, gg) => {
       const G = gestureRefs.current;
-      if (G.landscape) {
-        if (g2.dy > 0) g.setValue(Math.min(1, g2.dy / 300)); else g.setValue(0);
-      } else {
-        if (g2.dy > 0) { m.setValue(Math.min(1, g2.dy / G.dist)); g.setValue(0); }
-        else if (g2.dy < 0) { g.setValue(Math.max(-1, g2.dy / 300)); }
-      }
+      if (G.landscape) { g.setValue(gg.dy > 0 ? Math.min(1, gg.dy / 300) : 0); }
+      else if (gg.dy > 0) { m.setValue(Math.min(1, gg.dy / G.dist)); g.setValue(0); }
+      else { g.setValue(Math.max(-1, gg.dy / 300)); }
     },
-    onPanResponderRelease: (_, g2) => {
+    onPanResponderRelease: (_, gg) => {
       const G = gestureRefs.current;
       videoDrag.current = Date.now();
-      const mm = Math.max(0, g2.dy / G.dist);
+      const mm = Math.max(0, gg.dy / G.dist);
       if (G.landscape) {
-        if (g2.dy > 60 || g2.vy > 0.7) { Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate(); }
+        if (gg.dy > 60 || gg.vy > 0.7) { Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate(); }
         else Animated.spring(g, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
         return;
       }
-      if (g2.dy < -60 || g2.vy < -0.7) {
-        Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate();
-      } else if (mm > 0.6 || g2.vy > 0.85) {
-        Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start(); G.minimize();
-      } else if (mm > 0.3 && G.pipOn) {
-        Animated.spring(m, { toValue: 0, useNativeDriver: true }).start(); G.pip();
-      } else {
-        Animated.spring(m, { toValue: G.mode === "mini" ? 1 : 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
-        Animated.spring(g, { toValue: 0, useNativeDriver: true }).start();
-      }
+      if (gg.dy < -60 || gg.vy < -0.7) { Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate(); }
+      else if (mm > 0.6 || gg.vy > 0.85) { Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start(); G.minimize(); }
+      else if (mm > 0.3 && G.pipOn) { Animated.spring(m, { toValue: 0, useNativeDriver: true }).start(); G.pip(); }
+      else { Animated.spring(m, { toValue: G.mode === "mini" ? 1 : 0, useNativeDriver: true, friction: 8, tension: 70 }).start(); Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); }
     },
     onPanResponderTerminationRequest: () => true,
-    onPanResponderTerminate: () => {
-      videoDrag.current = Date.now();
-      Animated.spring(m, { toValue: gestureRefs.current.mode === "mini" ? 1 : 0, useNativeDriver: true }).start();
-      Animated.spring(g, { toValue: 0, useNativeDriver: true }).start();
-    }
+    onPanResponderTerminate: () => { videoDrag.current = Date.now(); Animated.spring(m, { toValue: gestureRefs.current.mode === "mini" ? 1 : 0, useNativeDriver: true }).start(); Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); }
   })).current;
 
   const miniPan = useRef(PanResponder.create({
@@ -1092,18 +1077,21 @@ function FloatingPlayer() {
     textShadowOffset: { width: 0, height: 1 }
   };
 
-  const surfaceStyle: any = isLand
-    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", transform: [{ translateY: gY }, { scale: gS }] }
-    : {
-        position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
-        borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
-        transform: [
-          { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
-          { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
-          { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) },
-          { translateY: gY }, { scale: gS }
-        ]
-      };
+const surfaceStyle: any = mode === "pip"
+    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
+    : isLand
+      ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", transform: [{ translateY: gY }, { scale: gS }] }
+      : {
+          position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
+          borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
+          transform: [
+            { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
+            { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
+            { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) },
+            { translateY: gY },
+            { scale: gS }
+          ]
+        };
 
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
 
@@ -1124,7 +1112,7 @@ function FloatingPlayer() {
       <Animated.View style={surfaceStyle} {...pan.panHandlers}>
         <VideoView
           player={P.player}
-          style={mode === "mini" ? { width: 1, height: 1, position: "absolute", opacity: 0, left: -10 } : [StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
+          style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
           contentFit={isLand ? P.fit : "contain"}
           nativeControls={false}
           allowsPictureInPicture
@@ -1211,10 +1199,9 @@ function FloatingPlayer() {
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn, left: 10, right: 10, backgroundColor: C.surface, borderRadius: 14, overflow: "hidden" }]} {...miniPan.panHandlers}>
-        {mode === "mini" ? (
-          <VideoView player={P.player} style={{ width: TW, height: miniBarH }} contentFit="cover" nativeControls={false} pointerEvents="none" />
-        ) : <View style={{ width: TW }} />}
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn, left: 10, right: 10, backgroundColor: "transparent", borderRadius: 14, overflow: "hidden" }]} {...miniPan.panHandlers}>
+        <View pointerEvents="none" style={{ position: "absolute", left: TW + 12, right: 0, top: 0, bottom: 0, backgroundColor: C.surface, borderTopRightRadius: 14, borderBottomRightRadius: 14 }} />
+        <View style={{ width: TW + 12 }} />
         <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", paddingHorizontal: 10 }} onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}>
           <View style={{ flex: 1, paddingRight: 6 }}>
             <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
@@ -1243,6 +1230,7 @@ function FloatingPlayer() {
                     <MenuItem label="Zoom verticale" value={Math.round((settings.portraitZoom || 1) * 100) + "%"} onPress={() => P.setMenu("zoom")} />
                     <MenuItem label="Riempimento schermo" value={P.fit === "contain" ? "Adatta" : "Riempi"} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />
                     <MenuItem label="Picture-in-Picture" value={P.pipAvailable ? "disponibile" : "modulo assente"} onPress={() => { P.setMenu(null); P.requestPip(); }} />
+                    <MenuItem label="Ascolta in solo audio" onPress={() => { P.setMenu(null); try { NovaPip.exitPip(); } catch {} P.minimize(); P.flash("Audio in background"); }} />
                     <MenuToggle label="Tasto rotazione in basso" value={settings.rotateBottom} onToggle={() => setSettings({ ...settings, rotateBottom: !settings.rotateBottom })} />
                     <MenuToggle label="Avvio rapido" value={settings.fastStart} onToggle={() => setSettings({ ...settings, fastStart: !settings.fastStart })} />
                     <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
@@ -1839,7 +1827,7 @@ const styles = StyleSheet.create({
   episode: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.08)" },
   episodeNum: { color: C.faint, fontSize: 20, fontWeight: "800", width: 28, textAlign: "center" },
   episodeThumb: { width: 130, aspectRatio: 16 / 9, borderRadius: 8, overflow: "hidden", backgroundColor: C.surface3 },
-  episodeTitle: { color: C.text, fontWeight: "800", fontSize: 15 },
+  episodeTitle: { backgroundColor: "rgba(18,18,24,0.85)", paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, alignSelf: "flex-start", overflow: "hidden", color: C.text, fontWeight: "800", fontSize: 15 },
   episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3 },
   similarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   similarItem: { width: "31%" },
