@@ -556,7 +556,7 @@ function PlayerProvider({ children }: any) {
   useEffect(() => {
     try { (player as any).timeUpdateEventInterval = 0.25; } catch {}
     try { player.staysActiveInBackground = true; } catch {}
-    try { (player as any).showNowPlayingNotification = true; } catch {}
+    try { (player as any).showNowPlayingNotification = false; } catch {}
   }, [player]);
 
   useEffect(() => {
@@ -808,6 +808,61 @@ function PlayerProvider({ children }: any) {
     open, close, minimize, expand, requestPip, toggleAudioOnly, togglePlay, beginScrub, endScrub, rotate,
     switchAudio, selectSub, setQuality, playEpisode, flash
   };
+  /* Notifica now-playing NOVA: la costruisce il modulo nativo con un intent
+     esplicito su questa app, cosi il tap non finisce piu su YouTube. */
+  useEffect(() => {
+    if (!NovaPip) return;
+    try { NovaPip.requestNotificationPermission(); } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!NovaPip) return;
+    if (mode === "closed" || !item) { try { NovaPip.hideNowPlaying(); } catch {} return; }
+    try {
+      const npTitle = String((episode && episode.title) || item.title || "NOVA");
+      const npSub = episode ? (item.title + " \u00B7 S" + episode.season + ":E" + episode.episode) : String(item.year || "Video");
+      NovaPip.showNowPlaying(npTitle, npSub, String(item.poster || ""), !!playing);
+      NovaPip.updateNowPlaying(!!playing, Number((player as any).currentTime || 0), Number((player as any).duration || 0));
+    } catch {}
+  }, [mode, item, episode, playing]);
+
+  useEffect(() => {
+    if (!NovaPip || mode === "closed") return;
+    const id = setInterval(() => {
+      try {
+        NovaPip.updateNowPlaying(!!playingRef.current, Number((player as any).currentTime || 0), Number((player as any).duration || 0));
+      } catch {}
+    }, 1000);
+    return () => clearInterval(id);
+  }, [mode]);
+
+  useEffect(() => {
+    if (!NovaPip || typeof (NovaPip as any).addListener !== "function") return;
+    let sub: any = null;
+    try {
+      sub = (NovaPip as any).addListener("onMediaAction", (e: any) => {
+        const a = String((e && (e.action || (e.nativeEvent && e.nativeEvent.action))) || "");
+        const p: any = player;
+        const seekTo = (sec: number) => {
+          const t = Math.max(0, sec);
+          try { if (typeof p.seekTo === "function") p.seekTo(t); else p.currentTime = t; } catch {}
+        };
+        const seekBy = (d: number) => {
+          try { if (typeof p.seekBy === "function") { p.seekBy(d); return; } } catch {}
+          seekTo(Number(p.currentTime || 0) + d);
+        };
+        if (a === "play") { try { p.play(); } catch {} }
+        else if (a === "pause") { try { p.pause(); } catch {} }
+        else if (a === "toggle") { try { if (playingRef.current) p.pause(); else p.play(); } catch {} }
+        else if (a === "rewind") seekBy(-10);
+        else if (a === "forward") seekBy(10);
+        else if (a.indexOf("seek:") === 0) seekTo(Number(a.slice(5)) / 1000);
+        else if (a === "close") { try { close(); } catch {} }
+      });
+    } catch {}
+    return () => { try { if (sub && sub.remove) sub.remove(); } catch {} };
+  }, [player]);
+
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
@@ -848,7 +903,7 @@ function FloatingPlayer() {
   const fadeIn = m.interpolate({ inputRange: [0.5, 1], outputRange: [0, 1], extrapolate: "clamp" });
   const dimBehind = m.interpolate({ inputRange: [0, 1], outputRange: [0, 0.35], extrapolate: "clamp" });
 
-  const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, minimize: () => {}, rotate: () => {}, pip: () => {}, pipOn: true });
+  const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, mode: "closed", minimize: () => {}, rotate: () => {}, pip: () => {}, expand: () => {}, pipOn: true });
   useEffect(() => {
     gestureRefs.current.landscape = isLand;
     gestureRefs.current.height = H;
@@ -857,45 +912,79 @@ function FloatingPlayer() {
     gestureRefs.current.rotate = () => P.rotate();
     gestureRefs.current.pip = () => P.requestPip("full");
     gestureRefs.current.pipOn = !!settings.pip;
+    gestureRefs.current.mode = mode;
+    gestureRefs.current.expand = () => P.expand();
   });
 
-  const dragThreshold = (_: any, g: any) =>
-    !gestureRefs.current.landscape && Math.abs(g.dy) > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2;
+  const videoDrag = useRef(0);
+  const miniDrag = useRef(0);
+
+  /* m e mode devono restare allineati: se divergono restano superfici
+     trasparenti che mangiano i tap e il miniplayer resta grigio. */
+  const firstSync = useRef(true);
+  useEffect(() => {
+    const target = mode === "mini" ? 1 : 0;
+    if (firstSync.current) { firstSync.current = false; m.setValue(target); return; }
+    Animated.timing(m, { toValue: target, duration: 220, useNativeDriver: true }).start();
+  }, [mode]);
+
+  const dragThreshold = (_: any, g: any) => {
+    const G = gestureRefs.current;
+    if (Math.abs(g.dy) <= 12 || Math.abs(g.dy) <= Math.abs(g.dx) * 1.2) return false;
+    return G.landscape ? g.dy < 0 : true;
+  };
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
     onMoveShouldSetPanResponder: dragThreshold,
-    onMoveShouldSetPanResponderCapture: (_, g) => g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2 && !gestureRefs.current.landscape,
-    onPanResponderMove: (_, g) => { if (g.dy > 0) m.setValue(Math.min(1, g.dy / gestureRefs.current.dist)); },
+    onMoveShouldSetPanResponderCapture: dragThreshold,
+    onPanResponderMove: (_, g) => {
+      const G = gestureRefs.current;
+      if (!G.landscape && g.dy > 0) m.setValue(Math.min(1, g.dy / G.dist));
+    },
     onPanResponderRelease: (_, g) => {
       const G = gestureRefs.current;
+      videoDrag.current = Date.now();
       const mm = Math.max(0, g.dy / G.dist);
       if (g.dy < -60 || g.vy < -0.7) {
         Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
         G.rotate();
-      } else if (mm > 0.6 || g.vy > 0.85) {
+      } else if (!G.landscape && (mm > 0.6 || g.vy > 0.85)) {
         Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start();
         G.minimize();
-      } else if (mm > 0.3 && G.pipOn) {
+      } else if (!G.landscape && mm > 0.3 && G.pipOn) {
         Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
         G.pip();
       } else {
-        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        Animated.spring(m, { toValue: G.mode === "mini" ? 1 : 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
       }
     },
     onPanResponderTerminationRequest: () => true,
-    onPanResponderTerminate: () => Animated.spring(m, { toValue: 0, useNativeDriver: true }).start()
+    onPanResponderTerminate: () => {
+      videoDrag.current = Date.now();
+      Animated.spring(m, { toValue: gestureRefs.current.mode === "mini" ? 1 : 0, useNativeDriver: true }).start();
+    }
   })).current;
 
   const miniPan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
     onMoveShouldSetPanResponder: (_, g) => g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx),
+    onMoveShouldSetPanResponderCapture: (_, g) => g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx),
     onPanResponderMove: (_, g) => { if (g.dy < 0) m.setValue(Math.max(0, 1 + g.dy / 300)); },
     onPanResponderRelease: (_, g) => {
-      if (g.dy < -30 || g.vy < -0.5) Animated.timing(m, { toValue: 0, duration: 220, useNativeDriver: true }).start();
-      else Animated.spring(m, { toValue: 1, useNativeDriver: true, friction: 8, tension: 70 }).start();
+      miniDrag.current = Date.now();
+      if (g.dy < -30 || g.vy < -0.5) {
+        Animated.timing(m, { toValue: 0, duration: 220, useNativeDriver: true }).start();
+        gestureRefs.current.expand();
+      } else {
+        Animated.spring(m, { toValue: 1, useNativeDriver: true, friction: 8, tension: 70 }).start();
+      }
     },
-    onPanResponderTerminate: () => Animated.spring(m, { toValue: 1, useNativeDriver: true }).start()
+    onPanResponderTerminationRequest: () => true,
+    onPanResponderTerminate: () => {
+      miniDrag.current = Date.now();
+      Animated.spring(m, { toValue: 1, useNativeDriver: true }).start();
+    }
   })).current;
 
   const itemId = P.item ? P.item.id : null;
@@ -1006,7 +1095,7 @@ function FloatingPlayer() {
         </Animated.ScrollView>
       )}
 
-      <Animated.View style={surfaceStyle} {...(!isLand ? pan.panHandlers : {})}>
+      <Animated.View style={surfaceStyle} {...pan.panHandlers}>
         <VideoView
           player={P.player}
           style={audioOnly ? { width: 1, height: 1, position: "absolute", opacity: 0, left: -10 } : [StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
@@ -1030,7 +1119,10 @@ function FloatingPlayer() {
           </View>
         ) : null}
 
-        <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={() => { if (Date.now() - videoDrag.current < 300) return; P.setControls(!P.controls); }}
+        />
 
         {subText && !audioOnly && mode === "full" ? (
           <View style={[styles.subBox, { bottom: showControls && isLand ? 82 : 14 }]} pointerEvents="none">
@@ -1107,12 +1199,21 @@ function FloatingPlayer() {
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...(!isLand ? miniPan.panHandlers : {})}>
-        <View style={{ width: TW + 12 }} />
-        <View style={{ flex: 1, paddingRight: 6 }}>
-          <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
-          <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
-        </View>
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...miniPan.panHandlers}>
+        <Pressable
+          style={{ flexDirection: "row", alignItems: "center", flex: 1 }}
+          onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}
+        >
+          <View style={{ width: TW + 12, alignItems: "center", justifyContent: "center" }}>
+            {audioOnly && P.item ? (
+              <Image source={{ uri: P.item.poster }} resizeMode="cover" style={{ width: TW, height: Math.round(TW * 9 / 16), borderRadius: 6, backgroundColor: C.surface2 }} />
+            ) : null}
+          </View>
+          <View style={{ flex: 1, paddingRight: 6 }}>
+            <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
+            <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
+          </View>
+        </Pressable>
         <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
