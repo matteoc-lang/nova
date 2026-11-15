@@ -29,3 +29,8 @@ android {
     buildConfig true
   }
 }
+
+dependencies {
+  implementation project(":expo-modules-core")
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:2.1.20"
+}
