@@ -82,7 +82,7 @@ jobs:
 
       - name: Validate JSON files
         run: |
-          node -e "const fs=require('fs');['nova/package.json','nova/app.json','nova/tsconfig.json'].forEach(f=>{JSON.parse(fs.readFileSync(f,'utf8'));console.log('OK '+f)})"
+          node -e "const fs=require('fs');['nova/package.json','nova/app.json','nova/tsconfig.json','nova/modules/nova-pip/expo-module.config.json'].forEach(f=>{JSON.parse(fs.readFileSync(f,'utf8'));console.log('OK '+f)})"
 
       - name: Accept Android SDK licenses
         run: |
@@ -92,27 +92,28 @@ jobs:
         working-directory: nova
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
-      - name: Align React and React Native to the SDK-blessed pair
+      - name: Align React/React-Native and add expo-notifications
         working-directory: nova
         run: |
           npx expo install --fix
+          npx expo install expo-notifications
           npm install --no-audit --no-fund --legacy-peer-deps
           echo "react         $(node -p "require('./node_modules/react/package.json').version")"
           echo "react-native  $(node -p "require('./node_modules/react-native/package.json').version")"
+          echo "notifications $(node -p "require('./node_modules/expo-notifications/package.json').version")"
 
       - name: Verify required packages
         working-directory: nova
         run: |
           missing=0
-          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-video expo-linear-gradient expo-navigation-bar expo-secure-store expo-screen-orientation; do
+          for p in expo-asset expo-constants expo-file-system expo-keep-awake expo-font expo-modules-core expo-video expo-linear-gradient expo-navigation-bar expo-secure-store expo-screen-orientation expo-notifications; do
             if [ -d "node_modules/$p" ]; then
               echo "OK      $p  $(node -p "require('./node_modules/$p/package.json').version")"
             else
               echo "MISSING $p"; missing=1
             fi
           done
-          echo "expo    $(node -p "require('./node_modules/expo/package.json').version")"
-          echo "rn      $(node -p "require('./node_modules/react-native/package.json').version")"
+          test -f modules/nova-pip/android/src/main/java/expo/modules/novapip/NovaPipModule.kt || { echo "MISSING modulo nativo nova-pip"; missing=1; }
           exit $missing
 
       - name: Generate Android project
