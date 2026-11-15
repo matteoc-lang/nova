@@ -901,7 +901,7 @@ function FloatingPlayer() {
 
   const fadeOut = m.interpolate({ inputRange: [0, 0.5], outputRange: [1, 0], extrapolate: "clamp" });
   const fadeIn = m.interpolate({ inputRange: [0.5, 1], outputRange: [0, 1], extrapolate: "clamp" });
-  const dimBehind = m.interpolate({ inputRange: [0, 1], outputRange: [0, 0.35], extrapolate: "clamp" });
+  const dimBehind = m.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 0.35, 0], extrapolate: "clamp" });
 
   const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, mode: "closed", minimize: () => {}, rotate: () => {}, pip: () => {}, expand: () => {}, pipOn: true });
   useEffect(() => {
@@ -1079,7 +1079,6 @@ function FloatingPlayer() {
       };
 
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
-  const audioBtn = <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />;
 
   return (
     <View style={styles.floatRoot} pointerEvents="box-none">
@@ -1098,26 +1097,12 @@ function FloatingPlayer() {
       <Animated.View style={surfaceStyle} {...pan.panHandlers}>
         <VideoView
           player={P.player}
-          style={audioOnly ? { width: 1, height: 1, position: "absolute", opacity: 0, left: -10 } : [StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
+          style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
           contentFit={isLand ? P.fit : "contain"}
           nativeControls={false}
           allowsPictureInPicture
         />
 
-        {audioOnly ? (
-          <View style={StyleSheet.absoluteFill} pointerEvents="none">
-            <LinearGradient colors={["#1a070d", "#08080b"]} style={StyleSheet.absoluteFill} />
-            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
-              <Image source={{ uri: P.item.poster }} style={{ width: "42%", aspectRatio: 1, borderRadius: 14, backgroundColor: C.surface2 }} />
-              <Text numberOfLines={1} style={{ color: C.text, fontWeight: "800", fontSize: 15, marginHorizontal: 18 }}>{title}</Text>
-              <Text numberOfLines={1} style={{ color: C.muted, fontSize: 11 }}>{subTitle}</Text>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <Ionicons name="headset" size={14} color={C.red} />
-                <Text style={{ color: C.red, fontWeight: "800", fontSize: 10, letterSpacing: 1 }}>MODALITÀ SOLO AUDIO</Text>
-              </View>
-            </View>
-          </View>
-        ) : null}
 
         <Pressable
           style={StyleSheet.absoluteFill}
@@ -1145,7 +1130,7 @@ function FloatingPlayer() {
               <IconButton name="chevron-down" size={26} onPress={P.minimize} />
               <View style={{ flex: 1 }}>{isLand ? <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text> : null}</View>
               {P.buffering && P.started ? <ActivityIndicator color={C.red} size="small" style={{ marginRight: 6 }} /> : null}
-              {audioBtn}
+              
               <IconButton name="copy-outline" size={20} onPress={() => P.requestPip()} />
               {isLand ? <IconButton name={P.fit === "contain" ? "scan-outline" : "contract-outline"} size={22} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} /> : null}
               {!settings.rotateBottom ? rotateBtn : null}
@@ -1199,7 +1184,8 @@ function FloatingPlayer() {
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...miniPan.panHandlers}>
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn, backgroundColor: "transparent" }]} {...miniPan.panHandlers}>
+        <View pointerEvents="none" style={{ position: "absolute", left: TW + 12, right: 0, top: 0, bottom: 0, backgroundColor: C.surface, borderTopRightRadius: 12, borderBottomRightRadius: 12 }} />
         <Pressable
           style={{ flexDirection: "row", alignItems: "center", flex: 1 }}
           onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}
@@ -1214,7 +1200,6 @@ function FloatingPlayer() {
             <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
           </View>
         </Pressable>
-        <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
         <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]}>
@@ -1232,7 +1217,6 @@ function FloatingPlayer() {
                 {P.menu === "root" && (
                   <>
                     <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
-                    <MenuToggle label="Modalità solo audio" value={audioOnly} onToggle={P.toggleAudioOnly} />
                     <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
                     <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
                     <MenuItem label="Zoom verticale" value={Math.round((settings.portraitZoom || 1) * 100) + "%"} onPress={() => P.setMenu("zoom")} />
