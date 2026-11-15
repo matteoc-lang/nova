@@ -556,7 +556,7 @@ function PlayerProvider({ children }: any) {
   useEffect(() => {
     try { (player as any).timeUpdateEventInterval = 0.25; } catch {}
     try { player.staysActiveInBackground = true; } catch {}
-    try { (player as any).showNowPlayingNotification = false; } catch {}
+    try { (player as any).showNowPlayingNotification = true; } catch {}
   }, [player]);
 
   useEffect(() => {
@@ -808,80 +808,13 @@ function PlayerProvider({ children }: any) {
     open, close, minimize, expand, requestPip, toggleAudioOnly, togglePlay, beginScrub, endScrub, rotate,
     switchAudio, selectSub, setQuality, playEpisode, flash
   };
-  /* Notifica now-playing NOVA: la costruisce il modulo nativo con un intent
-     esplicito su questa app, cosi il tap non finisce piu su YouTube. */
-  useEffect(() => {
-    if (!NovaPip) return;
-    try { NovaPip.requestNotificationPermission(); } catch {}
-  }, []);
-
-  useEffect(() => {
-    if (!NovaPip) return;
-    if (mode === "closed" || !item) { try { NovaPip.hideNowPlaying(); } catch {} return; }
-    try {
-      const npTitle = String((episode && episode.title) || item.title || "NOVA");
-      const npSub = episode ? (item.title + " \u00B7 S" + episode.season + ":E" + episode.episode) : String(item.year || "Video");
-      NovaPip.showNowPlaying(npTitle, npSub, String(item.poster || ""), !!playing);
-      NovaPip.updateNowPlaying(!!playing, Number((player as any).currentTime || 0), Number((player as any).duration || 0));
-    } catch {}
-  }, [mode, item, episode, playing]);
-
-  useEffect(() => {
-    if (!NovaPip || mode === "closed") return;
-    const id = setInterval(() => {
-      try {
-        NovaPip.updateNowPlaying(!!playingRef.current, Number((player as any).currentTime || 0), Number((player as any).duration || 0));
-      } catch {}
-    }, 1000);
-    return () => clearInterval(id);
-  }, [mode]);
-
-  useEffect(() => {
-    if (!NovaPip || typeof (NovaPip as any).addListener !== "function") return;
-    let sub: any = null;
-    try {
-      sub = (NovaPip as any).addListener("onMediaAction", (e: any) => {
-        const a = String((e && (e.action || (e.nativeEvent && e.nativeEvent.action))) || "");
-        const p: any = player;
-        const seekTo = (sec: number) => {
-          const t = Math.max(0, sec);
-          try { if (typeof p.seekTo === "function") p.seekTo(t); else p.currentTime = t; } catch {}
-        };
-        const seekBy = (d: number) => {
-          try { if (typeof p.seekBy === "function") { p.seekBy(d); return; } } catch {}
-          seekTo(Number(p.currentTime || 0) + d);
-        };
-        if (a === "play") { try { p.play(); } catch {} }
-        else if (a === "pause") { try { p.pause(); } catch {} }
-        else if (a === "toggle") { try { if (playingRef.current) p.pause(); else p.play(); } catch {} }
-        else if (a === "rewind") seekBy(-10);
-        else if (a === "forward") seekBy(10);
-        else if (a.indexOf("seek:") === 0) seekTo(Number(a.slice(5)) / 1000);
-        else if (a === "close") { try { close(); } catch {} }
-      });
-    } catch {}
-    return () => { try { if (sub && sub.remove) sub.remove(); } catch {} };
-  }, [player]);
-
-  useEffect(() => {
-    if (!NovaPip || typeof (NovaPip as any).addListener !== "function") return;
-    let sub: any = null;
-    try {
-      sub = (NovaPip as any).addListener("onPipAction", (e: any) => {
-        const a = String((e && (e.action || (e.nativeEvent && e.nativeEvent.action))) || "");
-        if (a === "audio") { try { NovaPip.exitPip(); } catch {} try { (player as any).staysActiveInBackground = true; } catch {} setMode("mini"); setControls(true); flash("Solo audio in background"); }
-        else if (a === "toggle") { togglePlay(); }
-        else if (a === "close") { close(); }
-      });
-    } catch {}
-    return () => { try { if (sub && sub.remove) sub.remove(); } catch {} };
-  }, [player]);
-
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
 function PipMount() {
-  return null;
+  const P = usePlayer();
+  if (P.mode !== "pip") return null;
+  return <VideoView player={P.player} style={{ width: 1, height: 1, position: "absolute", opacity: 0, left: -10 }} nativeControls={false} allowsPictureInPicture />;
 }
 
 function FloatingPlayer() {
@@ -890,9 +823,6 @@ function FloatingPlayer() {
   const dim = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const m = useRef(new Animated.Value(0)).current;
-  const g = useRef(new Animated.Value(0)).current;
-  const gY = g.interpolate({ inputRange: [-1, 0, 1], outputRange: [-46, 0, 70], extrapolate: "clamp" });
-  const gS = g.interpolate({ inputRange: [-1, 0, 1], outputRange: [1.05, 1, 0.9], extrapolate: "clamp" });
   const mode = P.mode;
   const isLand = P.landscape || dim.width > dim.height;
   const audioOnly = !!P.audioOnly;
@@ -907,7 +837,7 @@ function FloatingPlayer() {
   const videoH = Math.min(W / aspect, H * 0.45);
   const fullY = insets.top;
   const miniBarH = 64;
-  const miniBarY = H - insets.bottom - miniBarH - 12;
+  const miniBarY = H - insets.bottom - miniBarH - 8;
   const TW = 96, TH = 54, TX = 14, TY = miniBarY + 5;
   const scaleMini = TW / W;
   const dxMini = TX + TW / 2 - W / 2;
@@ -916,9 +846,9 @@ function FloatingPlayer() {
 
   const fadeOut = m.interpolate({ inputRange: [0, 0.5], outputRange: [1, 0], extrapolate: "clamp" });
   const fadeIn = m.interpolate({ inputRange: [0.5, 1], outputRange: [0, 1], extrapolate: "clamp" });
-  const dimBehind = m.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 0.35, 0], extrapolate: "clamp" });
+  const dimBehind = m.interpolate({ inputRange: [0, 1], outputRange: [0, 0.35], extrapolate: "clamp" });
 
-  const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, mode: "closed", minimize: () => {}, rotate: () => {}, pip: () => {}, expand: () => {}, pipOn: true });
+  const gestureRefs = useRef({ landscape: false, height: 0, dist: 1, minimize: () => {}, rotate: () => {}, pip: () => {}, pipOn: true });
   useEffect(() => {
     gestureRefs.current.landscape = isLand;
     gestureRefs.current.height = H;
@@ -927,75 +857,45 @@ function FloatingPlayer() {
     gestureRefs.current.rotate = () => P.rotate();
     gestureRefs.current.pip = () => P.requestPip("full");
     gestureRefs.current.pipOn = !!settings.pip;
-    gestureRefs.current.mode = mode;
-    gestureRefs.current.expand = () => P.expand();
   });
 
-  const videoDrag = useRef(0);
-  const miniDrag = useRef(0);
+  const dragThreshold = (_: any, g: any) =>
+    !gestureRefs.current.landscape && Math.abs(g.dy) > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2;
 
-  /* m e mode devono restare allineati: se divergono restano superfici
-     trasparenti che mangiano i tap e il miniplayer resta grigio. */
-  const firstSync = useRef(true);
-  useEffect(() => {
-    const target = mode === "mini" ? 1 : 0;
-    if (firstSync.current) { firstSync.current = false; m.setValue(target); return; }
-    Animated.timing(m, { toValue: target, duration: 220, useNativeDriver: true }).start();
-  }, [mode]);
-
-  const dragThreshold = (_: any, g: any) => {
-    const G = gestureRefs.current;
-    if (Math.abs(g.dy) <= 12 || Math.abs(g.dy) <= Math.abs(g.dx) * 1.2) return false;
-    return G.landscape ? g.dy < 0 : true;
-  };
-
-const pan = useRef(PanResponder.create({
+  const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
-    onMoveShouldSetPanResponder: (_, gg) => Math.abs(gg.dy) > 12 && Math.abs(gg.dy) > Math.abs(gg.dx) * 1.2,
-    onMoveShouldSetPanResponderCapture: (_, gg) => Math.abs(gg.dy) > 12 && Math.abs(gg.dy) > Math.abs(gg.dx) * 1.2,
-    onPanResponderMove: (_, gg) => {
+    onMoveShouldSetPanResponder: dragThreshold,
+    onMoveShouldSetPanResponderCapture: (_, g) => g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2 && !gestureRefs.current.landscape,
+    onPanResponderMove: (_, g) => { if (g.dy > 0) m.setValue(Math.min(1, g.dy / gestureRefs.current.dist)); },
+    onPanResponderRelease: (_, g) => {
       const G = gestureRefs.current;
-      if (G.landscape) { g.setValue(gg.dy > 0 ? Math.min(1, gg.dy / 300) : 0); }
-      else if (gg.dy > 0) { m.setValue(Math.min(1, gg.dy / G.dist)); g.setValue(0); }
-      else { g.setValue(Math.max(-1, gg.dy / 300)); }
-    },
-    onPanResponderRelease: (_, gg) => {
-      const G = gestureRefs.current;
-      videoDrag.current = Date.now();
-      const mm = Math.max(0, gg.dy / G.dist);
-      if (G.landscape) {
-        if (gg.dy > 60 || gg.vy > 0.7) { Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate(); }
-        else Animated.spring(g, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
-        return;
+      const mm = Math.max(0, g.dy / G.dist);
+      if (g.dy < -60 || g.vy < -0.7) {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        G.rotate();
+      } else if (mm > 0.6 || g.vy > 0.85) {
+        Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+        G.minimize();
+      } else if (mm > 0.3 && G.pipOn) {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
+        G.pip();
+      } else {
+        Animated.spring(m, { toValue: 0, useNativeDriver: true, friction: 8, tension: 70 }).start();
       }
-      if (gg.dy < -60 || gg.vy < -0.7) { Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); G.rotate(); }
-      else if (mm > 0.6 || gg.vy > 0.85) { Animated.timing(m, { toValue: 1, duration: 200, useNativeDriver: true }).start(); G.minimize(); }
-      else if (mm > 0.3 && G.pipOn) { Animated.spring(m, { toValue: 0, useNativeDriver: true }).start(); G.pip(); }
-      else { Animated.spring(m, { toValue: G.mode === "mini" ? 1 : 0, useNativeDriver: true, friction: 8, tension: 70 }).start(); Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); }
     },
     onPanResponderTerminationRequest: () => true,
-    onPanResponderTerminate: () => { videoDrag.current = Date.now(); Animated.spring(m, { toValue: gestureRefs.current.mode === "mini" ? 1 : 0, useNativeDriver: true }).start(); Animated.spring(g, { toValue: 0, useNativeDriver: true }).start(); }
+    onPanResponderTerminate: () => Animated.spring(m, { toValue: 0, useNativeDriver: true }).start()
   })).current;
 
   const miniPan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => false,
     onMoveShouldSetPanResponder: (_, g) => g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx),
-    onMoveShouldSetPanResponderCapture: (_, g) => g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx),
     onPanResponderMove: (_, g) => { if (g.dy < 0) m.setValue(Math.max(0, 1 + g.dy / 300)); },
     onPanResponderRelease: (_, g) => {
-      miniDrag.current = Date.now();
-      if (g.dy < -30 || g.vy < -0.5) {
-        Animated.timing(m, { toValue: 0, duration: 220, useNativeDriver: true }).start();
-        gestureRefs.current.expand();
-      } else {
-        Animated.spring(m, { toValue: 1, useNativeDriver: true, friction: 8, tension: 70 }).start();
-      }
+      if (g.dy < -30 || g.vy < -0.5) Animated.timing(m, { toValue: 0, duration: 220, useNativeDriver: true }).start();
+      else Animated.spring(m, { toValue: 1, useNativeDriver: true, friction: 8, tension: 70 }).start();
     },
-    onPanResponderTerminationRequest: () => true,
-    onPanResponderTerminate: () => {
-      miniDrag.current = Date.now();
-      Animated.spring(m, { toValue: 1, useNativeDriver: true }).start();
-    }
+    onPanResponderTerminate: () => Animated.spring(m, { toValue: 1, useNativeDriver: true }).start()
   })).current;
 
   const itemId = P.item ? P.item.id : null;
@@ -1077,28 +977,20 @@ const pan = useRef(PanResponder.create({
     textShadowOffset: { width: 0, height: 1 }
   };
 
-const MBH = 64;
-  const MBY = H - insets.bottom - MBH - 12;
-  const MW = 92, MH = 52, MX = 16, MY = MBY + 6;
-  const surfaceStyle: any = mode === "pip"
+  const surfaceStyle: any = isLand
     ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
-    : mode === "mini"
-      ? { position: "absolute", left: MX, top: MY, width: MW, height: MH, backgroundColor: "#000", overflow: "hidden", borderRadius: 10 }
-      : isLand
-        ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", transform: [{ translateY: gY }, { scale: gS }] }
-        : {
-            position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
-            borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 10], extrapolate: "clamp" }),
-            transform: [
-              { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
-              { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
-              { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) },
-              { translateY: gY },
-              { scale: gS }
-            ]
-          };
+    : {
+        position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
+        borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
+        transform: [
+          { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
+          { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
+          { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) }
+        ]
+      };
 
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
+  const audioBtn = <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />;
 
   return (
     <View style={styles.floatRoot} pointerEvents="box-none">
@@ -1114,20 +1006,31 @@ const MBH = 64;
         </Animated.ScrollView>
       )}
 
-      <Animated.View style={surfaceStyle} {...pan.panHandlers}>
+      <Animated.View style={surfaceStyle} {...(!isLand ? pan.panHandlers : {})}>
         <VideoView
           player={P.player}
-          style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
+          style={audioOnly ? { width: 1, height: 1, position: "absolute", opacity: 0, left: -10 } : [StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
           contentFit={isLand ? P.fit : "contain"}
           nativeControls={false}
           allowsPictureInPicture
         />
 
+        {audioOnly ? (
+          <View style={StyleSheet.absoluteFill} pointerEvents="none">
+            <LinearGradient colors={["#1a070d", "#08080b"]} style={StyleSheet.absoluteFill} />
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
+              <Image source={{ uri: P.item.poster }} style={{ width: "42%", aspectRatio: 1, borderRadius: 14, backgroundColor: C.surface2 }} />
+              <Text numberOfLines={1} style={{ color: C.text, fontWeight: "800", fontSize: 15, marginHorizontal: 18 }}>{title}</Text>
+              <Text numberOfLines={1} style={{ color: C.muted, fontSize: 11 }}>{subTitle}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Ionicons name="headset" size={14} color={C.red} />
+                <Text style={{ color: C.red, fontWeight: "800", fontSize: 10, letterSpacing: 1 }}>MODALITÀ SOLO AUDIO</Text>
+              </View>
+            </View>
+          </View>
+        ) : null}
 
-        <Pressable
-          style={StyleSheet.absoluteFill}
-          onPress={() => { if (Date.now() - videoDrag.current < 300) return; P.setControls(!P.controls); }}
-        />
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
 
         {subText && !audioOnly && mode === "full" ? (
           <View style={[styles.subBox, { bottom: showControls && isLand ? 82 : 14 }]} pointerEvents="none">
@@ -1150,7 +1053,7 @@ const MBH = 64;
               <IconButton name="chevron-down" size={26} onPress={P.minimize} />
               <View style={{ flex: 1 }}>{isLand ? <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text> : null}</View>
               {P.buffering && P.started ? <ActivityIndicator color={C.red} size="small" style={{ marginRight: 6 }} /> : null}
-              
+              {audioBtn}
               <IconButton name="copy-outline" size={20} onPress={() => P.requestPip()} />
               {isLand ? <IconButton name={P.fit === "contain" ? "scan-outline" : "contract-outline"} size={22} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} /> : null}
               {!settings.rotateBottom ? rotateBtn : null}
@@ -1204,19 +1107,17 @@ const MBH = 64;
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: MBY, height: MBH, opacity: fadeIn, left: 10, right: 10, backgroundColor: "transparent", borderRadius: 14, overflow: "visible" }]} {...miniPan.panHandlers}>
-        <View pointerEvents="none" style={{ position: "absolute", left: MW + 12, right: 0, top: 0, bottom: 0, backgroundColor: C.surface, borderTopRightRadius: 14, borderBottomRightRadius: 14 }} />
-        <View style={{ width: MW + 12 }} />
-        <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", paddingRight: 6 }} onPress={() => { if (Date.now() - miniDrag.current < 300) return; P.expand(); }}>
-          <View style={{ flex: 1, paddingRight: 6 }}>
-            <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
-            <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
-          </View>
-        </Pressable>
+      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...(!isLand ? miniPan.panHandlers : {})}>
+        <View style={{ width: TW + 12 }} />
+        <View style={{ flex: 1, paddingRight: 6 }}>
+          <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
+          <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
+        </View>
+        <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />
         <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
         <IconButton name="close" size={22} onPress={P.close} />
-        <View style={{ position: "absolute", left: MW + 12, right: 0, bottom: 0, height: 3, backgroundColor: C.surface3, borderBottomRightRadius: 14, overflow: "hidden" }} pointerEvents="none">
-          <View style={{ height: 3, width: pct + "%", backgroundColor: C.red }} />
+        <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]}>
+          <View style={[styles.progressFill, { width: pct + "%" }]} />
         </View>
       </Animated.View>
 
@@ -1230,12 +1131,12 @@ const MBH = 64;
                 {P.menu === "root" && (
                   <>
                     <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
+                    <MenuToggle label="Modalità solo audio" value={audioOnly} onToggle={P.toggleAudioOnly} />
                     <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
                     <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
                     <MenuItem label="Zoom verticale" value={Math.round((settings.portraitZoom || 1) * 100) + "%"} onPress={() => P.setMenu("zoom")} />
                     <MenuItem label="Riempimento schermo" value={P.fit === "contain" ? "Adatta" : "Riempi"} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} />
                     <MenuItem label="Picture-in-Picture" value={P.pipAvailable ? "disponibile" : "modulo assente"} onPress={() => { P.setMenu(null); P.requestPip(); }} />
-                    <MenuItem label="Ascolta in solo audio" onPress={() => { P.setMenu(null); try { NovaPip.exitPip(); } catch {} P.minimize(); P.flash("Audio in background"); }} />
                     <MenuToggle label="Tasto rotazione in basso" value={settings.rotateBottom} onToggle={() => setSettings({ ...settings, rotateBottom: !settings.rotateBottom })} />
                     <MenuToggle label="Avvio rapido" value={settings.fastStart} onToggle={() => setSettings({ ...settings, fastStart: !settings.fastStart })} />
                     <MenuToggle label="Prossimo episodio" value={settings.autoplay} onToggle={() => setSettings({ ...settings, autoplay: !settings.autoplay })} />
@@ -1796,7 +1697,7 @@ const styles = StyleSheet.create({
   ghostButtonText: { color: "#fff", fontWeight: "800", fontSize: 14 },
   rows: { marginTop: -20, paddingBottom: 40 },
   row: { marginTop: 22 },
-  rowTitle: { backgroundColor: "rgba(24,24,32,0.88)", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, alignSelf: "flex-start", overflow: "hidden", color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
+  rowTitle: { color: C.text, fontSize: 18, fontWeight: "800", paddingHorizontal: 16, marginBottom: 10 },
   rowContent: { paddingHorizontal: 16 },
   card: {},
   cardPressed: { transform: [{ scale: 1.05 }], opacity: 0.9 },
@@ -1816,7 +1717,7 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 30, color: C.text, paddingHorizontal: 16, paddingVertical: 10 },
   grid: { padding: 16 },
   gridItem: { flex: 1 / 3, maxWidth: "33.333%", paddingHorizontal: 5, marginBottom: 18 },
-  gridTitle: { color: C.muted, fontSize: 12, marginTop: 6  backgroundColor: "rgba(8,8,12,0.88)", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignSelf: "flex-start", overflow: "hidden", marginBottom: 4, color: "#ffffff",},
+  gridTitle: { color: C.muted, fontSize: 12, marginTop: 6 },
   detailHero: { minHeight: 560, justifyContent: "flex-end" },
   detailHeroContent: { padding: 20, paddingBottom: 34 },
   detailTitle: { color: C.text, fontSize: 40, fontWeight: "900", textTransform: "uppercase", marginTop: 16, marginBottom: 10 },
@@ -1832,8 +1733,8 @@ const styles = StyleSheet.create({
   episode: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.08)" },
   episodeNum: { color: C.faint, fontSize: 20, fontWeight: "800", width: 28, textAlign: "center" },
   episodeThumb: { width: 130, aspectRatio: 16 / 9, borderRadius: 8, overflow: "hidden", backgroundColor: C.surface3 },
-  episodeTitle: { backgroundColor: "rgba(18,18,24,0.85)", paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, alignSelf: "flex-start", overflow: "hidden", color: C.text, fontWeight: "800", fontSize: 15 },
-  episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3  backgroundColor: "rgba(8,8,12,0.88)", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignSelf: "flex-start", overflow: "hidden", marginBottom: 4, color: "#d8d8e0",},
+  episodeTitle: { color: C.text, fontWeight: "800", fontSize: 15 },
+  episodeDesc: { color: C.muted, fontSize: 12, marginTop: 3 },
   similarGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   similarItem: { width: "31%" },
   roundButton: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: "rgba(255,255,255,0.6)", alignItems: "center", justifyContent: "center" },
