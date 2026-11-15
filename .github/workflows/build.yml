@@ -7,6 +7,11 @@ on:
       - 'nova/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
+    inputs:
+      debug:
+        description: "Costruire anche l'APK debug (diagnostica)"
+        required: false
+        default: "false"
 
 concurrency:
   group: nova-apk
@@ -34,13 +39,15 @@ jobs:
           java-version: 17
 
       - name: Cache npm
+        id: cache-npm
         uses: actions/cache@v4
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ hashFiles('nova/package.json') }}
           restore-keys: npm-${{ runner.os }}-
 
-      - name: Cache Gradle
+      - name: Cache Gradle (dipendenze + build cache)
+        id: cache-gradle
         uses: actions/cache@v4
         with:
           path: |
@@ -49,11 +56,10 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('nova/package.json') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Cache Android NDK
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/lib/android/sdk/ndk
-          key: ndk-ubuntu24-sdk54-v1
+      - name: Report cache status
+        run: |
+          echo "npm    cache-hit=${{ steps.cache-npm.outputs.cache-hit }}"
+          echo "gradle cache-hit=${{ steps.cache-gradle.outputs.cache-hit }}"
 
       - name: Remove UTF-8 BOM from source files
         run: |
@@ -88,16 +94,12 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
-      - name: Install JS dependencies
-        working-directory: nova
-        run: npm install --no-audit --no-fund --legacy-peer-deps
-
-      - name: Align React/React-Native and add expo-notifications
+      - name: Install JS dependencies and align SDK versions
         working-directory: nova
         run: |
+          npm install --no-audit --no-fund --legacy-peer-deps
           npx expo install --fix
           npx expo install expo-notifications
-          npm install --no-audit --no-fund --legacy-peer-deps
           echo "react         $(node -p "require('./node_modules/react/package.json').version")"
           echo "react-native  $(node -p "require('./node_modules/react-native/package.json').version")"
           echo "notifications $(node -p "require('./node_modules/expo-notifications/package.json').version")"
@@ -134,8 +136,11 @@ jobs:
       - name: Point Gradle to Android SDK
         run: echo "sdk.dir=$ANDROID_HOME" > nova/android/local.properties
 
-      - name: Give Gradle more memory
-        run: echo "org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g" >> nova/android/gradle.properties
+      - name: Tune Gradle (memoria + build cache + parallelo)
+        run: |
+          echo "org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g" >> nova/android/gradle.properties
+          echo "org.gradle.caching=true" >> nova/android/gradle.properties
+          echo "org.gradle.parallel=true" >> nova/android/gradle.properties
 
       - name: Build RELEASE APK
         working-directory: nova/android
@@ -143,18 +148,26 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Build DEBUG APK (diagnostica)
+      - name: Build DEBUG APK (solo su richiesta)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true'
         working-directory: nova/android
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
-      - name: Upload APKs
+      - name: Upload RELEASE APK
         uses: actions/upload-artifact@v4
         with:
           name: nova-apk
-          path: |
-            nova/android/app/build/outputs/apk/release/app-release.apk
-            nova/android/app/build/outputs/apk/debug/app-debug.apk
+          path: nova/android/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload DEBUG APK
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-apk-debug
+          path: nova/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
           if-no-files-found: error
