@@ -552,10 +552,12 @@ function PlayerProvider({ children }: any) {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
 
+  // NIENTE showNowPlayingNotification: apre YouTube invece dell'app.
+  // La notifica media vive solo dentro la finestra PiP (tasto cuffie nativo).
   useEffect(() => {
     try { (player as any).timeUpdateEventInterval = 0.25; } catch {}
     try { player.staysActiveInBackground = true; } catch {}
-    try { (player as any).showNowPlayingNotification = true; } catch {}
+    try { (player as any).showNowPlayingNotification = false; } catch {}
   }, [player]);
 
   useEffect(() => {
@@ -585,7 +587,7 @@ function PlayerProvider({ children }: any) {
     return () => { NavigationBar.setVisibilityAsync("visible").catch(() => {}); };
   }, [mode]);
 
-  /* PiP: stato letto dall'activity reale + tastino "solo audio" dentro il PiP */
+  /* PiP: stato letto dal modulo nativo + tasto cuffie dentro il PiP */
   useEffect(() => {
     if (!NovaPip || mode === "closed") return;
     const t = setInterval(() => {
@@ -625,13 +627,6 @@ function PlayerProvider({ children }: any) {
     } catch {}
     if (!ok && NovaPip) { try { ok = !!NovaPip.enterPip(); } catch {} }
     if (!ok) flash("PiP non disponibile su questo dispositivo");
-  }
-
-  function toggleAudioOnly() {
-    setAudioOnly(v => {
-      flash(v ? "Modalità audio disattivata" : "Modalità solo audio attiva");
-      return !v;
-    });
   }
 
   async function loadSubTrack(stream: any, silent = false) {
@@ -805,28 +800,14 @@ function PlayerProvider({ children }: any) {
     position, duration, scrubbing, scrub, cues, subIndex, subLoading, notice, ended,
     nextEp, videoSize, landscape, controls, menu, fit, audioOnly, pipAvailable: !!NovaPip,
     setControls, setMenu, setScrub, setFit,
-    open, close, minimize, expand, requestPip, toggleAudioOnly, togglePlay, beginScrub, endScrub, rotate,
+    open, close, minimize, expand, requestPip, togglePlay, beginScrub, endScrub, rotate,
     switchAudio, selectSub, setQuality, playEpisode, flash
   };
   return <PlayerCtx.Provider value={value}>{children}</PlayerCtx.Provider>;
 }
 
-/* In PiP la finestra mostra l'activity: teniamo il video a schermo intero lì dentro */
-function PipMount() {
-  const P = usePlayer();
-  if (P.mode !== "pip") return null;
-  return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} allowsPictureInPicture />
-      {P.audioOnly && P.item ? (
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: "#000", alignItems: "center", justifyContent: "center" }]}>
-          <Image source={{ uri: P.item.poster }} style={{ width: "55%", aspectRatio: 1, borderRadius: 12, backgroundColor: C.surface2 }} />
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
+/* Unica VideoView montata: si morphs tra full/mini/pip.
+   In PiP mostra il video a schermo pieno dentro la finestra + overlay solo-audio se attivo. */
 function FloatingPlayer() {
   const P = usePlayer();
   const { settings, setSettings, items, list, toggleList } = useApp();
@@ -963,10 +944,10 @@ function FloatingPlayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId, epId, infoUrl, inList, settings.stats, P.subIndex, P.cues.length, insets.bottom, P.pipAvailable]);
 
-  if (mode === "closed" || mode === "pip" || !P.item) return null;
+  if (mode === "closed" || !P.item) return null;
 
   const subText = activeCueText(P.cues, P.position);
-  const showControls = isLand ? P.controls : true;
+  const showControls = mode === "pip" ? false : (isLand ? P.controls : true);
   const bigSpinner = (P.loading || P.buffering) && !P.started;
   const zoom = isLand ? 1 : (settings.portraitZoom || 1);
   const menuW = Math.min(400, W - 32);
@@ -988,26 +969,42 @@ function FloatingPlayer() {
     textShadowOffset: { width: 0, height: 1 }
   };
 
-  const surfaceStyle: any = isLand
-    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
-    : {
-        position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
-        borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
-        transform: [
-          { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
-          { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
-          { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) }
-        ]
-      };
+  /* In PiP la VideoView è a schermo pieno dentro la finestra di sistema.
+     In full: occupa il riquadro in alto. In mini: si shrinka alla miniatura 96x54. */
+  const surfaceStyle: any = mode === "pip"
+    ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden", opacity: 0 }
+    : isLand
+      ? { position: "absolute", left: 0, top: 0, width: W, height: H, backgroundColor: "#000", overflow: "hidden" }
+      : {
+          position: "absolute", left: 0, top: fullY, width: W, height: videoH, backgroundColor: "#000", overflow: "hidden",
+          borderRadius: m.interpolate({ inputRange: [0, 1], outputRange: [0, 7], extrapolate: "clamp" }),
+          transform: [
+            { translateX: m.interpolate({ inputRange: [0, 1], outputRange: [0, dxMini], extrapolate: "clamp" }) },
+            { translateY: m.interpolate({ inputRange: [0, 1], outputRange: [0, dyMini], extrapolate: "clamp" }) },
+            { scale: m.interpolate({ inputRange: [0, 1], outputRange: [1, scaleMini], extrapolate: "clamp" }) }
+          ]
+        };
+
+  /* PipMount-like: in modalità pip teniamo la VideoView montata così il sistema può catturarla,
+     ma la rendiamo invisibile nell'app (opacity 0). L'overlay con la locandina
+     per la modalità solo-audio viene mostrato sopra. */
+  const pipMount = mode === "pip" ? (
+    <VideoView
+      player={P.player}
+      style={StyleSheet.absoluteFill}
+      contentFit="contain"
+      nativeControls={false}
+      allowsPictureInPicture
+    />
+  ) : null;
 
   const rotateBtn = <IconButton name="sync-outline" size={20} onPress={P.rotate} />;
-  const audioBtn = <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />;
 
   return (
-    <View style={styles.floatRoot} pointerEvents="box-none">
+    <View style={styles.floatRoot} pointerEvents={mode === "pip" ? "none" : "box-none"}>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: "#000", opacity: isLand ? 0 : dimBehind }]} />
 
-      {!isLand && (
+      {!isLand && mode !== "pip" && (
         <Animated.ScrollView
           pointerEvents={mode === "full" ? "auto" : "none"}
           style={[styles.infoPanelAbs, { top: fullY + videoH, opacity: fadeOut }]}
@@ -1017,39 +1014,32 @@ function FloatingPlayer() {
         </Animated.ScrollView>
       )}
 
-      <Animated.View style={surfaceStyle} {...(!isLand ? pan.panHandlers : {})}>
+      <Animated.View style={surfaceStyle} {...(mode === "full" && !isLand ? pan.panHandlers : {})}>
         <VideoView
           player={P.player}
-          style={audioOnly ? { width: 1, height: 1, position: "absolute", opacity: 0, left: -10 } : [StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
+          style={[StyleSheet.absoluteFill, zoom !== 1 ? { transform: [{ scale: zoom }] } : null]}
           contentFit={isLand ? P.fit : "contain"}
           nativeControls={false}
           allowsPictureInPicture
         />
 
-        {audioOnly ? (
-          <View style={StyleSheet.absoluteFill} pointerEvents="none">
-            <LinearGradient colors={["#1a070d", "#08080b"]} style={StyleSheet.absoluteFill} />
-            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10 }}>
-              <Image source={{ uri: P.item.poster }} style={{ width: "42%", aspectRatio: 1, borderRadius: 14, backgroundColor: C.surface2 }} />
-              <Text numberOfLines={1} style={{ color: C.text, fontWeight: "900", fontSize: 16, marginHorizontal: 18 }}>{title}</Text>
-              <Text numberOfLines={1} style={{ color: C.muted, fontSize: 12, fontWeight: "600" }}>{subTitle}</Text>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <Ionicons name="headset" size={14} color={C.red} />
-                <Text style={{ color: C.red, fontWeight: "800", fontSize: 10, letterSpacing: 1 }}>MODALITÀ SOLO AUDIO</Text>
-              </View>
-            </View>
+        {pipMount}
+
+        {mode === "pip" && audioOnly ? (
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: "#000", alignItems: "center", justifyContent: "center" }]} pointerEvents="none">
+            <Image source={{ uri: P.item.poster }} style={{ width: "55%", aspectRatio: 1, borderRadius: 12, backgroundColor: C.surface2 }} />
           </View>
         ) : null}
 
-        <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />
+        {mode !== "pip" && <Pressable style={StyleSheet.absoluteFill} onPress={() => P.setControls(!P.controls)} />}
 
-        {subText && !audioOnly && mode === "full" ? (
+        {subText && mode === "full" ? (
           <View style={[styles.subBox, { bottom: showControls && isLand ? 82 : 14 }]} pointerEvents="none">
             <Text style={[styles.subText, subStyle]}>{subText}</Text>
           </View>
         ) : null}
 
-        {bigSpinner ? <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View> : null}
+        {bigSpinner && mode !== "pip" ? <View style={styles.centerSpin} pointerEvents="none"><ActivityIndicator color={C.red} size="large" /></View> : null}
 
         {showControls && !bigSpinner && !P.ended && !P.error && mode === "full" ? (
           <Pressable onPress={P.togglePlay} style={({ pressed }) => [styles.centerPlay, pressed && styles.btnPressed]} hitSlop={26}>
@@ -1064,7 +1054,6 @@ function FloatingPlayer() {
               <IconButton name="chevron-down" size={26} onPress={P.minimize} />
               <View style={{ flex: 1 }}>{isLand ? <Text numberOfLines={1} style={styles.playerTitle}>{title}</Text> : null}</View>
               {P.buffering && P.started ? <ActivityIndicator color={C.red} size="small" style={{ marginRight: 6 }} /> : null}
-              {audioBtn}
               <IconButton name="copy-outline" size={20} onPress={() => P.requestPip()} />
               {isLand ? <IconButton name={P.fit === "contain" ? "scan-outline" : "contract-outline"} size={22} onPress={() => P.setFit(P.fit === "contain" ? "cover" : "contain")} /> : null}
               {!settings.rotateBottom ? rotateBtn : null}
@@ -1078,6 +1067,7 @@ function FloatingPlayer() {
               <View style={styles.vControls}>
                 <Text style={styles.playerTime}>{fmt(P.scrubbing ? P.scrub : P.position)} <Text style={styles.faint}>/ {fmt(P.duration)}</Text></Text>
                 <View style={{ flex: 1 }} />
+                <IconButton name={P.playing ? "pause" : "play"} size={28} onPress={P.togglePlay} />
                 <IconButton name="musical-notes-outline" size={20} onPress={() => P.setMenu("audio")} />
                 <IconButton name={P.subIndex != null ? "chatbox-ellipses" : "chatbox-ellipses-outline"} size={20} onPress={() => P.setMenu("subs")} />
                 <Pressable onPress={() => P.setMenu("quality")} style={({ pressed }) => [styles.hdButton, pressed && styles.btnPressed]}>
@@ -1090,7 +1080,7 @@ function FloatingPlayer() {
           </>
         ) : null}
 
-        {P.error ? (
+        {P.error && mode !== "pip" ? (
           <View style={styles.vError}>
             <Ionicons name="warning-outline" size={36} color={C.amber} />
             <Text style={styles.emptyTitleSm}>Video non caricabile</Text>
@@ -1102,7 +1092,7 @@ function FloatingPlayer() {
           </View>
         ) : null}
 
-        {P.ended ? (
+        {P.ended && mode !== "pip" ? (
           <View style={styles.vError}>
             <Text style={styles.endLabel}>{P.nextEp ? "Prossimo episodio" : "Fine"}</Text>
             {P.nextEp ? (
@@ -1120,25 +1110,28 @@ function FloatingPlayer() {
         ) : null}
       </Animated.View>
 
-      <Animated.View pointerEvents={mode === "mini" ? "auto" : "none"} style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...(!isLand ? miniPan.panHandlers : {})}>
-        <Pressable style={({ pressed }) => [styles.miniTapArea, pressed && { opacity: 0.7 }]} onPress={P.expand}>
-          <View style={{ width: TW + 12 }} />
-          <View style={{ flex: 1, paddingRight: 6 }}>
-            <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
-            <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
+      {mode === "mini" && (
+        <Animated.View pointerEvents="auto" style={[styles.miniBar, { top: miniBarY, height: miniBarH, opacity: fadeIn }]} {...(!isLand ? miniPan.panHandlers : {})}>
+          <Pressable style={({ pressed }) => [styles.miniTapArea, pressed && { opacity: 0.7 }]} onPress={P.expand}>
+            <View style={styles.miniVideo}>
+              <VideoView player={P.player} style={StyleSheet.absoluteFill} contentFit="cover" nativeControls={false} allowsPictureInPicture />
+            </View>
+            <View style={{ flex: 1, paddingRight: 6 }}>
+              <Text numberOfLines={1} style={styles.miniTitle}>{title}</Text>
+              <Text numberOfLines={1} style={styles.miniSub}>{subTitle}</Text>
+            </View>
+          </Pressable>
+          <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
+          <IconButton name="close" size={22} onPress={P.close} />
+          <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]}>
+            <View style={[styles.progressFill, { width: pct + "%" }]} />
           </View>
-        </Pressable>
-        <IconButton name={audioOnly ? "headset" : "headset-outline"} size={20} active={audioOnly} onPress={P.toggleAudioOnly} />
-        <IconButton name={P.playing ? "pause" : "play"} size={24} onPress={P.togglePlay} />
-        <IconButton name="close" size={22} onPress={P.close} />
-        <View style={[styles.miniProgress, { position: "absolute", left: 0, right: 0, bottom: 0 }]}>
-          <View style={[styles.progressFill, { width: pct + "%" }]} />
-        </View>
-      </Animated.View>
+        </Animated.View>
+      )}
 
-      {P.notice ? <View style={[styles.notice, { top: isLand ? Math.max(insets.top, 12) : insets.top + videoH + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View> : null}
+      {P.notice && mode !== "pip" ? <View style={[styles.notice, { top: isLand ? Math.max(insets.top, 12) : insets.top + videoH + 8 }]} pointerEvents="none"><Text style={styles.noticeText}>{P.notice}</Text></View> : null}
 
-      {P.menu ? (
+      {P.menu && mode !== "pip" ? (
         <Modal visible transparent animationType="fade" onRequestClose={() => P.setMenu(null)}>
           <Pressable style={[styles.modalBackdrop, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]} onPress={() => P.setMenu(null)}>
             <Pressable style={[styles.menu, { width: menuW, maxHeight: menuH }]} onPress={() => {}}>
@@ -1146,7 +1139,6 @@ function FloatingPlayer() {
                 {P.menu === "root" && (
                   <>
                     <MenuHeader title="Impostazioni player" onBack={() => P.setMenu(null)} onClose={() => P.setMenu(null)} />
-                    <MenuToggle label="Modalità solo audio" value={audioOnly} onToggle={P.toggleAudioOnly} />
                     <MenuItem label="Velocità" value={settings.speed === 1 ? "Normale" : settings.speed + "×"} onPress={() => P.setMenu("speed")} />
                     <MenuItem label="Stile sottotitoli" onPress={() => P.setMenu("substyle")} />
                     <MenuItem label="Zoom verticale" value={Math.round((settings.portraitZoom || 1) * 100) + "%"} onPress={() => P.setMenu("zoom")} />
@@ -1570,7 +1562,6 @@ export default function App() {
         if (pr) { prog = JSON.parse(pr); setProgress(prog); }
         if (li) { lst = JSON.parse(li); setList(lst); }
       } catch {}
-      /* Cache libreria: apertura istantanea, aggiornamento in background */
       try {
         const lc = await AsyncStorage.getItem("nova.libcache");
         if (lc) {
@@ -1662,7 +1653,6 @@ export default function App() {
                 </Stack.Navigator>
               </NavigationContainer>
             )}
-            <PipMount />
             <FloatingPlayer />
           </View>
         </PlayerProvider>
@@ -1783,7 +1773,8 @@ const styles = StyleSheet.create({
   infoDesc: { color: "#d6d6de", fontSize: 15, lineHeight: 22, marginBottom: 12 },
   statsInline: { backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, marginTop: 14 },
   miniBar: { position: "absolute", left: 8, right: 8, backgroundColor: C.surface2, borderColor: C.line, borderWidth: 1, borderRadius: 12, overflow: "hidden", flexDirection: "row", alignItems: "center", paddingLeft: 6, paddingRight: 4 },
-  miniTapArea: { flexDirection: "row", alignItems: "center", flex: 1 },
+  miniTapArea: { flexDirection: "row", alignItems: "center", flex: 1, paddingRight: 6 },
+  miniVideo: { width: 96, height: 54, borderRadius: 7, overflow: "hidden", backgroundColor: "#000", marginRight: 10 },
   miniTitle: { color: C.text, fontWeight: "800", fontSize: 14 },
   miniSub: { color: C.muted, fontSize: 11.5, fontWeight: "600" },
   miniProgress: { height: 3, backgroundColor: "rgba(255,255,255,0.18)" },
